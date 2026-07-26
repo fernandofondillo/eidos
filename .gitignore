@@ -1,0 +1,80 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+wheels/
+*.whl
+.installed.cfg
+MANIFEST
+
+# --- uv / venv ---
+.venv/
+venv/
+env/
+.uv-cache/
+uv.lock
+
+# --- Testing & coverage ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# --- Type checkers ---
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-*
+
+# --- EIDOS runtime data (¡NUNCA subir al repo!) ---
+# Los datos cognitivos son privados del usuario y portables via SSD/pendrive
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+data/vectors/
+data/graph.json
+data/monologues/*.json
+data/capsules/*.eidos
+data/migrations_applied.log
+!data/.gitkeep
+
+# --- Modelos locales (Fase 2) — demasiado grandes para git ---
+models/
+*.gguf
+*.onnx
+
+# --- Secrets ---
+.env
+.env.*
+*.pem
+*.key
+secrets/
+
+# --- OS ---
+Thumbs.db
+desktop.ini
+
+# --- Logs ---
+*.log
+logs/

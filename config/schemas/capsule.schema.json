@@ -1,0 +1,108 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://eidos.project/schemas/capsule.schema.json",
+  "title": "EIDOS Capsule (.eidos)",
+  "description": "Schema de una cápsula cognitiva — auto-especialización generada por el Módulo de Génesis (Fase 3). Una cápsula es ontología + reglas + herramientas + tono, auto-inyectable en milisegundos.",
+  "type": "object",
+  "required": ["id", "name", "version", "ontology", "rules", "tone", "tools", "metadata"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "UUID v4 único de la cápsula.",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "name": {
+      "type": "string",
+      "description": "Nombre humano-legible. ej: 'Auditor de código Rust'.",
+      "minLength": 3,
+      "maxLength": 80
+    },
+    "version": {
+      "type": "string",
+      "description": "Versión semántica.",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "description": {
+      "type": "string",
+      "description": "Resumen de qué hace la cápsula y cuándo activarla.",
+      "maxLength": 500
+    },
+    "ontology": {
+      "type": "object",
+      "description": "Conocimiento estructurado: entidades, relaciones, dominio.",
+      "required": ["domain"],
+      "properties": {
+        "domain": { "type": "string" },
+        "entities": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "relations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["subject", "predicate", "object"],
+            "properties": {
+              "subject": { "type": "string" },
+              "predicate": { "type": "string" },
+              "object": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "rules": {
+      "type": "array",
+      "description": "Reglas procedimentales en lenguaje natural estructurado. El núcleo las evalúa antes de actuar.",
+      "items": {
+        "type": "object",
+        "required": ["id", "condition", "action"],
+        "properties": {
+          "id": { "type": "string" },
+          "condition": { "type": "string" },
+          "action": { "type": "string" },
+          "priority": { "type": "integer", "default": 0 }
+        }
+      }
+    },
+    "tone": {
+      "type": "object",
+      "description": "Personalidad comunicativa. La capa de NLG (Fase 2) la usa para adaptar respuestas.",
+      "required": ["style"],
+      "properties": {
+        "style": { "type": "string", "enum": ["formal", "casual", "academic", "playful", "technical"] },
+        "empathy": { "type": "integer", "minimum": 0, "maximum": 10, "default": 5 },
+        "verbosity": { "type": "integer", "minimum": 0, "maximum": 10, "default": 5 }
+      }
+    },
+    "tools": {
+      "type": "array",
+      "description": "Herramientas que la cápsula puede invocar. Validadas contra whitelist de seguridad en el Tool Sandbox (Fase 3.1).",
+      "items": {
+        "type": "object",
+        "required": ["name", "entry_point"],
+        "properties": {
+          "name": { "type": "string" },
+          "entry_point": { "type": "string", "description": "Módulo Python o ruta a script." },
+          "args_schema": { "type": "object" },
+          "timeout_sec": { "type": "integer", "default": 30 }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Metadatos de gestión: TTL, scoring de uso, génesis.",
+      "required": ["created_at", "ttl_days", "uses", "last_used", "favorite"],
+      "properties": {
+        "created_at": { "type": "string", "format": "date-time" },
+        "ttl_days": { "type": "integer", "minimum": 1, "default": 7 },
+        "uses": { "type": "integer", "default": 0 },
+        "last_used": { "type": ["string", "null"], "format": "date-time" },
+        "favorite": { "type": "boolean", "default": false },
+        "genesis_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "parent_capsule_id": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

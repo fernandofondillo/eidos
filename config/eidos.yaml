@@ -1,0 +1,97 @@
+# EIDOS configuration — Master Config
+# Vibe-coding friendly: every setting documented inline.
+# This file is the single source of truth for the cognitive core.
+# Edit it freely; EIDOS reloads on restart.
+
+# -----------------------------------------------------------------------------
+# Meta — identidad del núcleo
+# -----------------------------------------------------------------------------
+meta:
+  name: "EIDOS"
+  version: "0.1.0-phase1.1"
+  locale: "es-ES"
+  # Identidad persistente (capa semántica la usa para auto-referencia)
+  identity: "Soy EIDOS, una entidad cognitiva autónoma, profunda y cooperativa."
+
+# -----------------------------------------------------------------------------
+# Core Engine — parámetros del monólogo interno
+# -----------------------------------------------------------------------------
+core:
+  # Backend del MonologueGenerator.
+  #   "stub"      → genera monólogos sintéticos deterministas (Fase 1.x)
+  #   "llama_cpp" → usa Qwen2.5-3B local (Fase 2)
+  #   "api"       → fallback a API externa (Fase 2.3)
+  monologue_backend: "stub"
+
+  # Umbral de confianza. Si el monólogo genera confidence < umbral,
+  # el router delega o pide aclaración al usuario.
+  confidence_threshold: 0.6
+
+  # Persistencia del monólogo (CRÍTICO para metacognición — Fase 1.3)
+  persist_monologues: true
+  monologues_dir: "data/monologues"
+
+  # Profundidad máxima del plan (steps). Modelos pequeños + plan largo = alucinación.
+  max_plan_steps: 5
+
+# -----------------------------------------------------------------------------
+# Memory — las 5 capas cognitivas
+# -----------------------------------------------------------------------------
+memory:
+  # Capa 1: Sensorial / Trabajo
+  sensory:
+    window_size: 50              # últimos N eventos en memoria inmediata
+
+  # Capa 2: Episódica (Hipocampo)
+  episodic:
+    backend: "sqlite_vec"        # v1: sqlite-vec; upgrade path: "lancedb"
+    db_path: "data/eidos.db"
+    embedding_dim: 384           # compatible con modelos small (Fase 2)
+    max_events: 10000            # LRU pruning pasado este umbral
+
+  # Capa 3: Semántica (Corteza) — grafo de conocimiento
+  semantic:
+    graph_path: "data/graph.json"
+    backend: "networkx"
+
+  # Capa 4: Procedimental (Cerebelo) — cápsulas .eidos
+  procedural:
+    capsules_dir: "data/capsules"
+    default_ttl_days: 7          # cápsula no-favorita expira si no se usa
+    favorite_preserve: true
+
+  # Capa 5: Metacognitiva (Lóbulo Frontal)
+  metacognitive:
+    index_table: "monologue_index"  # tabla en eidos.db
+    consolidation_interval_sec: 300 # cada 5 min, background
+
+# -----------------------------------------------------------------------------
+# Cortex Hub — placeholder (se activa en Fase 2)
+# -----------------------------------------------------------------------------
+cortex:
+  enabled: false
+  models_dir: "models"
+  default_model: "Qwen2.5-3B-Instruct-Q4_K_M.gguf"
+  vram_budget_mb: 4096
+  fallback_to_api: true
+
+# -----------------------------------------------------------------------------
+# EIDOS MESH — placeholder (se activa en Fase 4)
+# -----------------------------------------------------------------------------
+mesh:
+  enabled: false
+  transport: "unix_socket"       # v1: sockets; upgrade path: "redis_embedded"
+  socket_path: "/tmp/eidos.mesh.sock"
+  heartbeat_sec: 2
+  leader_timeout_sec: 6
+  resource_token_ttl_sec: 30
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+logging:
+  level: "INFO"                  # DEBUG | INFO | WARNING | ERROR
+  format: "json"                 # "json" o "console"
+  log_file: "data/eidos.log"
+  rotate_max_mb: 10
+  rotate_backups: 3
