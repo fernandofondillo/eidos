@@ -1,16 +1,24 @@
-"""EidosCore — orquestador principal del núcleo cognitivo. Fase 1.2.
+"""EidosCore — orquestador principal del núcleo cognitivo. Fase 1.3.
 
-Flujo (ampliado con memoria):
-    user_input → SensoryMemory.store(user_input)
-               → MonologueGenerator → Monologue
-               → MetacognitiveMemory.store(monologue, route)
-               → ActionRouter       → Route
-               → EpisodicMemory.search() si route == SEARCH_MEMORY
-               → (NLG/acción)       → Response
-               → SensoryMemory.store(response)
-               → EpisodicMemory.store(interaction)
+Pipeline completo:
+    user_input
+      → MotivationModule.observe_user_input()     # reward de satisfacción
+      → SensoryMemory.store(user_input)
+      → MonologueGenerator → Monologue
+      → MotivationModule.observe_confidence()     # reward de curiosidad
+      → MetacognitiveMemory.store(monologue, route)
+      → ActionRouter → Route
+      → EpisodicMemory.search() si route == SEARCH_MEMORY
+      → (NLG/acción) → Response
+      → SensoryMemory.store(response)
+      → EpisodicMemory.store(interaction)
 
-La NLG real llega en Fase 2. La consolidación background en Fase 1.3.
+Background:
+    Consolidator (hilo daemon) cada 5 min:
+      - compacta sensory → episódica
+      - indexa monólogos huérfanos
+      - infiere outcomes pendientes
+      - expira cápsulas por TTL
 """
 
 from __future__ import annotations
@@ -20,7 +28,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from eidos.core.consolidator import Consolidator
 from eidos.core.monologue import Monologue, MonologueGenerator
+from eidos.core.motivation import MotivationModule
 from eidos.core.router import ActionRouter, Route
 from eidos.memory.store import MemoryStore
 from eidos.utils.logging import get_logger
@@ -35,16 +45,13 @@ class Response(BaseModel):
     monologue_id: str
     route_type: str
     confidence: float
-    # Fase 1.2: contexto recuperado de memoria (si route = SEARCH_MEMORY)
     memory_context: list[dict[str, Any]] | None = None
+    # Fase 1.3: reward signal del turno actual
+    reward_delta: float = 0.0
 
 
 class EidosCore:
-    """El núcleo cognitivo de EIDOS.
-
-    Fase 1.1: orquestador pensar → decidir → responder.
-    Fase 1.2: + memoria cognitiva de 5 capas integrada.
-    """
+    """El núcleo cognitivo de EIDOS."""
 
     def __init__(
         self,
@@ -53,6 +60,9 @@ class EidosCore:
         monologues_dir: Path | None = None,
         max_plan_steps: int = 5,
         memory: MemoryStore | None = None,
+        motivation: MotivationModule | None = None,
+        consolidator: Consolidator | None = None,
+        auto_start_consolidator: bool = True,
     ) -> None:
         self._generator = MonologueGenerator(
             backend=monologue_backend,
@@ -62,19 +72,36 @@ class EidosCore:
         self._router = ActionRouter(confidence_threshold=confidence_threshold)
         self._monologues_dir = monologues_dir
         self._memory = memory
+        self._motivation = motivation
+        self._consolidator = consolidator
+
+        # Arrancar consolidador background si está configurado
+        if self._consolidator is not None and auto_start_consolidator:
+            self._consolidator.start()
+
         logger.info(
             "eidos_core_init",
             backend=monologue_backend,
             threshold=confidence_threshold,
             persist=bool(monologues_dir),
             memory=bool(memory),
+            motivation=bool(motivation),
+            consolidator=bool(consolidator),
         )
 
     def think_and_respond(self, user_input: str, context: str | None = None) -> Response:
         """Pipeline completo: input → memoria → monólogo → ruta → respuesta."""
         logger.debug("eidos_input", length=len(user_input))
 
-        # 0. Sensory memory — registro del input
+        # 0a. Reward de satisfacción (heurística del input del usuario)
+        reward_delta = 0.0
+        if self._motivation is not None:
+            try:
+                reward_delta += self._motivation.observe_user_input(user_input)
+            except Exception as e:
+                logger.warning("motivation_observe_user_input_failed", error=str(e))
+
+        # 0b. Sensory memory — registro del input
         if self._memory is not None:
             self._memory.sensory.store(
                 kind="user_input",
@@ -90,6 +117,15 @@ class EidosCore:
             confidence=monologue.confidence,
             backend=monologue.backend,
         )
+
+        # 1b. Reward de curiosidad (basado en confidence)
+        if self._motivation is not None:
+            try:
+                reward_delta += self._motivation.observe_confidence(
+                    monologue.confidence, monologue_id=monologue.id
+                )
+            except Exception as e:
+                logger.warning("motivation_observe_confidence_failed", error=str(e))
 
         # 2. Decidir ruta
         route = self._router.decide(monologue)
@@ -119,8 +155,12 @@ class EidosCore:
             try:
                 self._memory.sensory.store(
                     kind="response",
-                    content=text[:200],  # truncar para sensory
-                    metadata={"route": route.route_type.value, "monologue_id": monologue.id},
+                    content=text[:200],
+                    metadata={
+                        "route": route.route_type.value,
+                        "monologue_id": monologue.id,
+                        "confidence": monologue.confidence,
+                    },
                 )
                 self._memory.episodic.store(
                     kind="interaction",
@@ -140,7 +180,14 @@ class EidosCore:
             route_type=route.route_type.value,
             confidence=monologue.confidence,
             memory_context=memory_context,
+            reward_delta=round(reward_delta, 4),
         )
+
+    def shutdown(self) -> None:
+        """Detiene el consolidador background limpiamente."""
+        if self._consolidator is not None:
+            self._consolidator.stop()
+            logger.info("eidos_core_shutdown_consolidator_stopped")
 
     @staticmethod
     def _render_response(
@@ -159,7 +206,6 @@ class EidosCore:
             f"Riesgo: {monologue.risk}\n"
         )
 
-        # Fase 1.2: incluir contexto recuperado de memoria
         if memory_context:
             body += "\nContexto recuperado de memoria episódica:\n"
             for i, ev in enumerate(memory_context, 1):

@@ -23,16 +23,16 @@ EIDOS no es un chatbot. Es un **organismo digital** con:
 | Fase | Descripción | Estado |
 |------|-------------|--------|
 | 1.1   | Estructura + Core Engine + MonologueGenerator (stub) | ✅ |
-| **1.2** | **5 capas de memoria (SQLite + sqlite-vec + grafo JSON)** | ✅ **Esta release** |
-| 1.3   | Motivación intrínseca + consolidación background | ⏳ Próxima |
-| 2     | Cortex Hub — modelos GGUF/ONNX locales | ⏳ |
+| 1.2   | 5 capas de memoria (SQLite + sqlite-vec + grafo JSON) | ✅ |
+| **1.3** | **Motivación intrínseca + consolidación background** | ✅ **Esta release** |
+| 2     | Cortex Hub — modelos GGUF/ONNX locales | ⏳ Próxima |
 | 3     | Génesis dinámica de cápsulas + Tool Sandbox | ⏳ |
 | 4     | EIDOS MESH — enjambre y cooperación | ⏳ |
 | 5     | UI Tauri v2 + empaquetado cross-platform | ⏳ |
 
 ---
 
-## 🚀 Quickstart (Fase 1.2)
+## 🚀 Quickstart (Fase 1.3)
 
 ### Requisitos
 
@@ -57,14 +57,23 @@ uv sync --extra dev
 ### Uso
 
 ```bash
-# REPL interactivo — visualiza el monólogo interno + contexto de memoria en vivo
+# REPL interactivo — monólogo + memoria + reward signal + consolidador background
 uv run eidos
 
-# Una sola consulta
-uv run eidos --once "¿Qué es EIDOS?"
+# Una sola consulta (sin arrancar consolidador)
+uv run eidos --once "¿Qué es EIDOS?" --no-consolidator
 
 # Estadísticas de las 5 capas de memoria
 uv run eidos stats
+
+# Métricas del reward signal (motivación intrínseca)
+uv run eidos motivation
+
+# Ejecutar consolidación manual inmediata
+uv run eidos consolidate
+
+# Historial de ejecuciones del consolidador
+uv run eidos runs
 
 # Con config custom
 uv run eidos --config /path/to/eidos.yaml
@@ -157,6 +166,34 @@ metacognitiva (Fase 1.3) pueda responder *"¿por qué decidí X hace 3 días?"*.
 **Embeddings stub**: en Fase 1.2 se usa un embedding determinista (bag-of-words + hash normalizado L2). Permite probar la capa vectorial sin GPU. En Fase 2 se sustituye por embeddings reales del Cortex Hub.
 
 **TTL de cápsulas**: las cápsulas no-favoritas expiran si no se usan en `ttl_days` (default 7). El consolidador (Fase 1.3) las poda automáticamente. Las marcadas `favorite=true` nunca expiran.
+
+---
+
+## 🎯 Motivación intrínseca + Consolidación (Fase 1.3)
+
+### Reward signal
+
+EIDOS tiene **3 drivers motivacionales** que generan rewards internos (rango `[-1, +1]`):
+
+| Driver | Peso | Origen | Trigger |
+|--------|------|--------|---------|
+| `curiosity` | +0.3 | MonologueGenerator | `confidence > avg_recent + 0.1` |
+| `capsule_reuse` | +0.4 | ProceduralMemory | Cápsula invocada exitosamente |
+| `user_satisfaction` | +0.3 / **-0.5** | Heurística sobre input del usuario | Racha de 3 turnos neutros = +0.3; señal negativa ("no", "mal", "incorrecto") = -0.5 |
+
+Cada reward se persiste en tabla `reward_events` para auditoría. El consolidador los usa para inferir `outcome` (positive/negative/neutral) en monólogos sin outcome explícito — **metacognición**: EIDOS aprende qué estrategias funcionaron.
+
+### Consolidador background
+
+Hilo daemon que ejecuta un loop cada `consolidation_interval_sec` (default 300s):
+
+1. **Compactación sensory→episódica**: promueve `response` con `confidence >= 0.6`.
+2. **Indexación de monólogos huérfanos**: recovery tras crash (JSONs en disco no indexados).
+3. **Inferencia de outcomes**: revisa rewards posteriores a cada monólogo y etiqueta outcome.
+4. **Poda de cápsulas por TTL**: llama `procedural.expire_due()`.
+5. **LRU episódica**: verifica overflow de `max_events`.
+
+Cada run se persiste en `consolidation_runs` con métricas por paso.
 
 ---
 

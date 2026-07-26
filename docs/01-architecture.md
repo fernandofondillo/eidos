@@ -93,7 +93,7 @@ Multi-instancia cooperativa en un mismo dispositivo:
 
 - ✅ **Fase 1.1**: Core Engine + MonologueGenerator (stub). Tests verdes.
 - ✅ **Fase 1.2**: 5 capas de memoria (SQLite + sqlite-vec + networkx + .eidos). 74 tests.
-- ⏳ Fase 1.3: Motivación intrínseca + consolidación background.
+- ✅ **Fase 1.3**: Motivación intrínseca (3 drivers) + consolidador background. 108 tests.
 - ⏳ Fase 2: Cortex Hub (Qwen2.5-3B local, llama-cpp-python).
 - ⏳ Fase 3: Génesis de cápsulas + Tool Sandbox.
 - ⏳ Fase 4: EIDOS MESH (sockets UNIX + leader election + arbitraje).
@@ -133,3 +133,47 @@ def stub_embed(text: str, dim: int = 256) -> list[float]:
 - **sqlite-vec no instalado** → EpisodicMemory degrada a bruteforce cosine en Python. Más lento pero funcional. Log de aviso al arranque.
 - **networkx no instalado** → SemanticMemory lanza RuntimeError con instrucciones claras al instanciarse (no silence failure).
 - **DB corrupta** → migraciones idempotentes, no rompen el arranque.
+
+## 7. Motivación + Consolidación (Fase 1.3) — detalle de implementación
+
+### Reward signal
+
+Cada interacción pasa por el `MotivationModule` antes y después del monólogo. Los 3 drivers se combinan linealmente:
+
+```python
+reward_delta = (
+    observe_user_input(user_input)       # +0.3 streak / -0.5 negative
+  + observe_confidence(confidence)       # +0.3 si sube >avg+0.1
+  + reward_capsule_use(capsule_id)       # +0.4 por invocación
+)
+```
+
+Persistencia: tabla `reward_events(id, ts, monologue_id, driver, delta, total, metadata)`. Cada reward es auditable.
+
+### Consolidador (hilo daemon)
+
+```python
+class Consolidator:
+    def run_once(self, kind="manual") -> dict:
+        return {
+            "sensory_promoted": self._compact_sensory_to_episodic(),
+            "monologues_indexed": self._index_orphan_monologues(),
+            "outcomes_inferred": self._infer_outcomes(),
+            "capsules_expired": self._expire_capsules(),
+            "episodic_pruned_check": self._check_episodic_overflow(),
+        }
+```
+
+- Thread daemon: muere con el proceso principal, sin necesidad de stop explícito.
+- `stop(timeout)` hace join limpio para shutdown controlado.
+- `run_once(kind="manual")` expuesto vía CLI para consolidación on-demand.
+- Cada run se persiste en `consolidation_runs` con métricas detalladas.
+
+### Inferencia de outcomes (metacognición)
+
+Para cada monologue en `monologue_index` con `outcome IS NULL`, el consolidador:
+1. Mira los `reward_events` en los 5 min posteriores al monologue.
+2. Suma los deltas por driver.
+3. Etiqueta: `positive` (sum > +0.2) / `negative` (sum < -0.2) / `neutral` (resto).
+
+Esto permite a la capa metacognitiva responder preguntas como *"¿qué tipo de rutas (route_type) tienden a generar outcomes negativos?"* — base del aprendizaje por refuerzo en futuras fases.
