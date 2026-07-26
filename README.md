@@ -27,12 +27,12 @@ EIDOS no es un chatbot. Es un **organismo digital** con:
 | 1.3   | Motivación intrínseca + consolidación background | ✅ |
 | 2     | Cortex Hub — modelos GGUF locales + API fallback con PrivacyFilter | ✅ |
 | 3     | Génesis dinámica de cápsulas + Tool Sandbox + EvolutionLoop | ✅ |
-| **4** | **EIDOS MESH — enjambre, leader election + arbitraje de recursos** | ✅ **Esta release** |
-| 5     | UI Tauri v2 + empaquetado cross-platform | ⏳ Próxima |
+| 4     | EIDOS MESH — enjambre, leader election + arbitraje de recursos | ✅ |
+| **5** | **UI Web (React + FastAPI) + Tauri v2 + despliegue cross-platform** | ✅ **Esta release** |
 
 ---
 
-## 🚀 Quickstart (Fase 4)
+## 🚀 Quickstart (Fase 5 — FINAL)
 
 ### Requisitos
 
@@ -96,6 +96,9 @@ uv run eidos cortex privacy-test "Mi email es test@example.com"
 
 # Estado del enjambre MESH (Fase 4)
 uv run eidos mesh status
+
+# 🌐 Servidor web con UI completa (Fase 5)
+uv run eidos web                  # arranca FastAPI + frontend en http://127.0.0.1:8765
 
 # Con config custom
 uv run eidos --config /path/to/eidos.yaml
@@ -510,6 +513,85 @@ uv run eidos mesh status
 - **Protocolo**: JSON-RPC 2.0 adaptado (Mensajes tipados: PUB, REQUEST, RESPONSE, ERROR).
 - **Topics pub/sub**: `heartbeat`, `memory_update`, `node_joined`, `node_left`, `leader_announce`.
 - **RPC methods**: `hello`, `goodbye`, `acquire_token`, `release_token`, `list_nodes`, `delegate_inference`, `who_is_leader`.
+
+---
+
+## 🌐 UI Web + Despliegue Cross-Platform (Fase 5)
+
+### Servidor Web (FastAPI + React)
+
+EIDOS incluye un servidor web completo que expone toda la funcionalidad via REST + WebSocket, con un frontend React que visualiza todo en tiempo real.
+
+```bash
+# Arrancar servidor web (backend + frontend)
+uv run eidos web
+
+# → http://127.0.0.1:8765
+# → API docs: http://127.0.0.1:8765/api/docs
+```
+
+### Frontend — Componentes
+
+| Componente | Función |
+|-----------|---------|
+| **ChatPanel** | Input + respuesta, streaming del monólogo via WebSocket |
+| **MonologueViewer** | JSON del monólogo en vivo (observation, hypothesis, plan, risk, confidence) |
+| **MemoryStatsPanel** | 5 capas en cards con métricas live (refresh cada 5s) |
+| **CapsulesManager** | Lista drafts (pendientes) + cápsulas activas, botones approve/reject/forge |
+| **MeshMap** | Topología del enjambre: Leader + Workers, estado de tokens |
+| **RewardChart** | Timeline del reward signal, desglose por driver (curiosidad, cápsulas, satisfacción) |
+| **EvolutionPanel** | Stats de autoevolución (total cápsulas, favoritas, candidatas a promoción) |
+
+### Stack del frontend
+
+- **Vite** + **React 18** + **TypeScript**
+- **Tailwind CSS** (dark theme, colores EIDOS: `#6db33f` primary, `#58a6ff` accent)
+- **WebSocket** para monólogo en vivo (con fallback a REST)
+- Auto-refresh cada 5s de stats, mesh, motivation, capsules
+
+### API REST
+
+```
+GET  /api/health              — health check
+POST /api/chat                — chat síncrono
+GET  /api/stats               — 5 capas de memoria
+GET  /api/capsules            — drafts + cápsulas activas
+POST /api/capsules/forge      — forjar nueva cápsula
+POST /api/capsules/approve    — aprobar draft
+POST /api/capsules/reject     — rechazar draft
+GET  /api/mesh/status         — estado del enjambre
+GET  /api/motivation          — reward signal
+GET  /api/evolution           — evolution stats
+GET  /api/config              — leer config
+PUT  /api/config              — actualizar config
+WS   /ws/chat                 — chat bidireccional con monólogo en vivo
+```
+
+### Desarrollo del frontend
+
+```bash
+cd ui
+npm install
+npm run dev    # Vite dev server en :5173 con proxy a :8765
+npm run build  # compila a ui/dist/ (servido por FastAPI en producción)
+```
+
+### Tauri v2 — App nativa cross-platform
+
+El directorio `desktop/` contiene la configuración Tauri v2 para empaquetar EIDOS como app nativa:
+
+```bash
+# Desarrollo (abre ventana nativa con HMR)
+cd desktop
+cargo tauri dev
+
+# Producción (.dmg / .msi / .AppImage)
+cargo tauri build --target aarch64-apple-darwin  # macOS Apple Silicon
+cargo tauri build --target x86_64-pc-windows-msvc  # Windows
+cargo tauri build --target x86_64-unknown-linux-gnu  # Linux
+```
+
+Ver [`desktop/README.md`](desktop/README.md) para guía completa de empaquetado con PyOxidizer/Nuitka y despliegue portable en SSD/Pendrive.
 
 ---
 

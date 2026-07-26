@@ -78,3 +78,19 @@ desktop.ini
 # --- Logs ---
 *.log
 logs/
+
+# --- Frontend (ui/) ---
+ui/node_modules/
+ui/dist/
+ui/.vite/
+ui/*.tsbuildinfo
+ui/npm-debug.log*
+ui/yarn-error.log*
+
+# --- Tauri (desktop/) ---
+desktop/target/
+desktop/gen/
+desktop/Cargo.lock
+
+# --- Python runtime data (created by web server) ---
+data/runtime/

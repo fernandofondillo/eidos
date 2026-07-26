@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-eidos-bg text-eidos-text antialiased;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply bg-eidos-surface border border-eidos-border rounded-lg;
+  }
+  .btn {
+    @apply px-3 py-1.5 rounded text-sm font-medium transition-colors;
+  }
+  .btn-primary {
+    @apply btn bg-eidos-primary text-black hover:bg-green-400;
+  }
+  .btn-secondary {
+    @apply btn bg-eidos-border text-eidos-text hover:bg-eidos-muted;
+  }
+  .btn-danger {
+    @apply btn bg-eidos-danger text-white hover:bg-red-400;
+  }
+  .input {
+    @apply bg-eidos-bg border border-eidos-border rounded px-3 py-2 text-eidos-text focus:outline-none focus:border-eidos-accent;
+  }
+  .badge {
+    @apply inline-block px-2 py-0.5 rounded text-xs font-medium;
+  }
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #0d1117;
+}
+::-webkit-scrollbar-thumb {
+  background: #30363d;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #484f58;
+}

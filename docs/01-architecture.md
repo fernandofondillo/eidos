@@ -97,7 +97,8 @@ Multi-instancia cooperativa en un mismo dispositivo:
 - ✅ **Fase 2**: Cortex Hub (ModelManager + LlamaCppBackend + Embeddings + APIFallback + PrivacyFilter). 158 tests.
 - ✅ **Fase 3**: Génesis de cápsulas + Tool Sandbox (defense-in-depth) + EvolutionLoop. 229 tests.
 - ✅ **Fase 4**: EIDOS MESH (sockets UNIX + leader election + arbitrator + MeshCoordinator). 279 tests.
-- ⏳ Fase 5: UI Tauri v2 + empaquetado cross-platform.
+- ✅ **Fase 5**: UI Web (FastAPI + React) + Tauri v2 + despliegue cross-platform. 298 tests.
+- 🎉 **PROYECTO COMPLETO** — 7/7 fases selladas.
 
 ## 6. Memoria cognitiva (Fase 1.2) — detalle de implementación
 
@@ -400,3 +401,107 @@ resource_tokens(
 - Resource acquisition (worker pide token vía RPC al leader).
 - Concurrent acquire denied (segundo token para mismo recurso → None).
 - Stats y lifecycle (start/stop idempotente).
+
+## 11. UI Web + Despliegue Cross-Platform (Fase 5)
+
+### Arquitectura 3 capas
+
+```
+┌─────────────────────────────────────────────────┐
+│              EIDOS.app / .exe / .AppImage       │
+│                                                 │
+│  ┌──────────────┐  ┌─────────────────────────┐  │
+│  │  Tauri v2    │  │  Python sidecar         │  │
+│  │  (Rust)      │──│  (FastAPI + EidosCore)  │  │
+│  │  WebKit UI   │  │  localhost:8765         │  │
+│  └──────────────┘  └─────────────────────────┘  │
+│         ↕ HTTP / WebSocket                      │
+│  ┌─────────────────────────────────────────────┐│
+│  │  React UI (ui/dist/)                        ││
+│  │  Chat + Monologue + Memory + Capsules +    ││
+│  │  MeshMap + RewardChart + Evolution         ││
+│  └─────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────┘
+```
+
+### Backend — FastAPI (eidos/web/)
+
+| Archivo | Rol |
+|---------|-----|
+| `server.py` | App FastAPI + endpoints REST + WebSocket + static mount |
+| `schemas.py` | Pydantic models (contrato frontend↔backend) |
+
+Endpoints:
+- REST: health, chat, stats, capsules (list/forge/approve/reject), mesh/status, motivation, evolution, config (get/put)
+- WebSocket: `/ws/chat` — chat bidireccional con monologue streaming
+
+Sirve frontend compilado desde `ui/dist/` en producción. CORS abierto para desarrollo (Vite en :5173).
+
+### Frontend — React + Vite + TypeScript (ui/)
+
+| Componente | Función |
+|-----------|---------|
+| `Header` | Estado global: versión, backend, WS connection, MESH role |
+| `ChatPanel` | Input + mensajes historicos, badges de route/backend/confidence/reward |
+| `MonologueViewer` | Monologue JSON en vivo (observation, hypothesis, plan, risk, confidence) |
+| `MemoryStatsPanel` | 5 capas con métricas (refresh cada 5s) |
+| `CapsulesManager` | Forge input + drafts pendientes + cápsulas activas |
+| `MeshMap` | Topología visual Leader↔Worker + tokens activos |
+| `RewardChart` | Total + desglose por driver + mini timeline de rewards recientes |
+| `EvolutionPanel` | Stats autoevolución (total, favoritas, candidatas) |
+
+Hooks:
+- `useEidosApi` — fetch REST con auto-refresh cada 5s
+- `useEidosWebSocket` — conexión WS con reconnect automático + fallback a REST
+
+Stack: Vite 5, React 18, TypeScript 5, Tailwind CSS 3 (dark theme).
+
+### Tauri v2 (desktop/)
+
+Configuración completa para empaquetado nativo:
+- `tauri.conf.json` — bundle targets: app, dmg, msi, deb, appimage
+- `src/main.rs` — lanza Python sidecar via `tauri_plugin_shell`
+- `Cargo.toml` — dependencias Tauri v2
+
+### Empaquetado Python standalone
+
+Para producción, el backend Python se compila a binario standalone:
+
+```bash
+# PyOxidizer (recomendado)
+pyoxidizer build --release
+# Output: binario nativo con Python embebido + todas las dependencias
+
+# Nuitka (alternativa)
+python -m nuitka --standalone --onefile --include-package=eidos eidos/web/server.py
+```
+
+### Despliegue portable SSD/Pendrive
+
+```
+SSD/Pendrive
+└── EIDOS/
+    ├── EIDOS.app/            # macOS (.app dentro de .dmg)
+    ├── EIDOS.exe             # Windows (.msi)
+    ├── EIDOS.AppImage        # Linux
+    ├── bin/
+    │   └── eidos-server      # Python compilado standalone
+    ├── config/
+    │   └── eidos.yaml        # config editable por el usuario
+    └── data/                 # memoria cognitiva del usuario (portable)
+        ├── eidos.db          # SQLite (5 capas)
+        ├── graph.json        # grafo semántico
+        ├── monologues/       # trazas metacognitivas
+        ├── capsules/         # .eidos files
+        └── migrations/       # SQL versionado
+```
+
+El usuario conecta el SSD a cualquier Mac/Win/Linux, hace doble clic en EIDOS, y su mente artificial está lista con toda su memoria cognitiva intacta.
+
+### Tests del web server
+
+`tests/test_web.py` (19 tests) cubre:
+- REST: health, chat, stats, capsules (CRUD), mesh/status, motivation, evolution, config
+- WebSocket: chat con monologue streaming, ping/pong, error handling
+- Usa `httpx.AsyncClient` con ASGI transport (sin puerto real)
+- `pytest-asyncio` en modo auto para tests async

@@ -1,0 +1,60 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "EIDOS",
+  "version": "0.1.0",
+  "identifier": "com.eidos.desktop",
+  "build": {
+    "frontendDist": "../ui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "cd ../ui && npm run dev",
+    "beforeBuildCommand": "cd ../ui && npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "EIDOS — Entidad Cognitiva Autónoma",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 1000,
+        "minHeight": 700,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "msi", "deb", "appimage"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "../eidos",
+      "../config",
+      "../data/migrations"
+    ],
+    "externalBin": [],
+    "copyright": "© 2026 EIDOS Project",
+    "category": "DeveloperTool",
+    "shortDescription": "Mente artificial cognitiva portable",
+    "longDescription": "EIDOS es un organismo digital con mente, memoria, motivación, sentidos, autoevolución y enjambre. 100% portable desde SSD/Pendrive."
+  },
+  "plugins": {
+    "shell": {
+      "sidecar": [
+        {
+          "command": "eidos-server",
+          "args": ["web", "--port", "8765"]
+        }
+      ]
+    }
+  }
+}

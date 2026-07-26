@@ -911,6 +911,47 @@ def mesh_status(ctx: click.Context) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Subcomandos: web (Fase 5)
+# ---------------------------------------------------------------------------
+
+
+@main.command()
+@click.option("--port", default=8765, help="Puerto (default: 8765)")
+@click.option("--host", default="127.0.0.1", help="Host (default: 127.0.0.1)")
+@click.option("--reload", is_flag=True, help="Auto-reload (desarrollo)")
+def web(port: int, host: str, reload: bool) -> None:
+    """Arranca el servidor web de EIDOS (FastAPI + frontend React)."""
+    import uvicorn
+    from eidos.web.server import init_core
+
+    config = load_config(None)
+    project_root = DEFAULT_CONFIG_PATH.resolve().parent.parent
+    init_core(config, project_root)
+
+    console.print(
+        Panel.fit(
+            f"[bold cyan]EIDOS Web Server[/] v{__version__}\n"
+            f"→ [link=http://{host}:{port}]http://{host}:{port}[/link]\n"
+            f"→ API docs: [link=http://{host}:{port}/api/docs]http://{host}:{port}/api/docs[/link]\n"
+            f"→ Backend: [yellow]{config.get('core', {}).get('monologue_backend', 'stub')}[/]\n"
+            f"→ Mesh: [{'green' if config.get('mesh', {}).get('enabled') else 'red'}]"
+            f"{'ON' if config.get('mesh', {}).get('enabled') else 'OFF'}[/]\n\n"
+            f"[dim]Ctrl-C para parar.[/]",
+            title="🌐 EIDOS Web",
+            border_style="cyan",
+        )
+    )
+
+    uvicorn.run(
+        "eidos.web.server:app",
+        host=host,
+        port=port,
+        reload=reload,
+        log_level="info",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Handler de turnos
 # ---------------------------------------------------------------------------
 
