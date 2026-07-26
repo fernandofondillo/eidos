@@ -2,9 +2,10 @@ interface HeaderProps {
   health: any;
   wsConnected: boolean;
   mesh: any;
+  onOpenSettings: () => void;
 }
 
-export function Header({ health, wsConnected, mesh }: HeaderProps) {
+export function Header({ health, wsConnected, mesh, onOpenSettings }: HeaderProps) {
   const backend = health?.backend || '...';
   const version = health?.version || '...';
   const meshRole = mesh?.enabled ? (mesh?.role || '...') : 'OFF';
@@ -31,6 +32,14 @@ export function Header({ health, wsConnected, mesh }: HeaderProps) {
           <span className={`badge ${mesh?.enabled ? 'bg-eidos-accent text-black' : 'bg-eidos-muted text-eidos-text'}`}>
             MESH: {meshRole}
           </span>
+          {/* Botón Settings (Fase 6) */}
+          <button
+            onClick={onOpenSettings}
+            className="btn-secondary text-sm ml-2"
+            title="Configuración: API keys, Cerebro Local"
+          >
+            ⚙️ Settings
+          </button>
         </div>
       </div>
     </header>

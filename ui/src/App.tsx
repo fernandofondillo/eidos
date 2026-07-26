@@ -8,16 +8,16 @@ import { CapsulesManager } from './components/CapsulesManager';
 import { MeshMap } from './components/MeshMap';
 import { RewardChart } from './components/RewardChart';
 import { EvolutionPanel } from './components/EvolutionPanel';
+import { SettingsPanel } from './components/SettingsPanel';
 
 export default function App() {
   const api = useEidosApi();
   const [messages, setMessages] = useState<ChatResponse[]>([]);
   const [currentMonologue, setCurrentMonologue] = useState<Monologue | null>(null);
   const [thinking, setThinking] = useState(false);
-  const [wsMessages, setWsMessages] = useState<any[]>([]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const handleWSMessage = useCallback((msg: any) => {
-    setWsMessages(prev => [...prev, msg]);
     if (msg.type === 'monologue' && msg.data) {
       setCurrentMonologue(msg.data as Monologue);
     }
@@ -39,7 +39,6 @@ export default function App() {
     if (connected) {
       send({ type: 'chat', message });
     } else {
-      // Fallback a REST si WS no está conectado
       api.sendChat(message).then(resp => {
         setMessages(prev => [...prev, resp]);
         if (resp.monologue) setCurrentMonologue(resp.monologue);
@@ -53,7 +52,12 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col">
-      <Header health={api.health} wsConnected={connected} mesh={api.mesh} />
+      <Header
+        health={api.health}
+        wsConnected={connected}
+        mesh={api.mesh}
+        onOpenSettings={() => setSettingsOpen(true)}
+      />
       
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-4 p-4">
         {/* Columna izquierda: Chat + Monólogo */}
@@ -81,6 +85,9 @@ export default function App() {
           <EvolutionPanel evolution={api.evolution} />
         </div>
       </div>
+
+      {/* Modal de Settings (Fase 6) */}
+      {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
     </div>
   );
 }

@@ -27,18 +27,21 @@ Estáticos:
 from __future__ import annotations
 
 import json
+import os
+import threading
 from pathlib import Path
 from typing import Any
 
 import yaml
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from eidos import __version__
 from eidos.core.engine import EidosCore
 from eidos.utils.logging import configure_logging, get_logger
+from eidos.web.providers import PROVIDERS, get_provider, list_providers
 from eidos.web.schemas import (
     ApproveRequest,
     ChatRequest,
@@ -350,6 +353,260 @@ async def update_config(config: dict[str, Any]) -> dict[str, Any]:
         return {"updated": True, "note": "Restart server to apply changes."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+# ---------------------------------------------------------------------------
+# API Providers + Keys (Fase 6) — gestion .env local + reload en caliente
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/providers")
+async def get_providers() -> dict[str, Any]:
+    """Lista de API providers soportados por la UI."""
+    return {"providers": list_providers()}
+
+
+def _env_file_path() -> Path:
+    return _project_root / ".env"
+
+
+def _read_env_keys() -> dict[str, str]:
+    """Lee las API keys del archivo .env. Devuelve dict env_var -> valor (o '')."""
+    env_path = _env_file_path()
+    keys: dict[str, str] = {}
+    if not env_path.exists():
+        return {p.env_var: "" for p in PROVIDERS}
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            k, v = line.split("=", 1)
+            keys[k.strip()] = v.strip()
+    # Asegurar que todos los providers estan presentes (aunque vacios)
+    for p in PROVIDERS:
+        if p.env_var not in keys:
+            keys[p.env_var] = ""
+    return keys
+
+
+def _write_env_keys(keys: dict[str, str]) -> None:
+    """Escribe las API keys al archivo .env. Solo las conocidas."""
+    env_path = _env_file_path()
+    lines = ["# API Keys - gestionado por EIDOS UI (boton Settings)"]
+    lines.append("# No editar manualmente.")
+    lines.append("")
+    for p in PROVIDERS:
+        val = keys.get(p.env_var, "")
+        # Sanitizar: no permitir saltos de linea en el valor
+        val = val.replace("\n", "").replace("\r", "").strip()
+        lines.append(f"{p.env_var}={val}")
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@app.get("/api/config/keys")
+async def get_keys() -> dict[str, Any]:
+    """Devuelve las API keys configuradas (enmascaradas: solo primeros 8 chars)."""
+    keys = _read_env_keys()
+    # Enmascarar para la UI: mostrar solo si esta set + primeros 8 chars
+    masked: dict[str, dict[str, Any]] = {}
+    for p in PROVIDERS:
+        val = keys.get(p.env_var, "")
+        if val:
+            masked[p.id] = {
+                "provider": p.name,
+                "env_var": p.env_var,
+                "set": True,
+                "preview": val[:8] + "..." if len(val) > 8 else val,
+            }
+        else:
+            masked[p.id] = {
+                "provider": p.name,
+                "env_var": p.env_var,
+                "set": False,
+                "preview": "",
+            }
+    return {"keys": masked}
+
+
+@app.post("/api/config/keys")
+async def save_keys(payload: dict[str, Any]) -> dict[str, Any]:
+    """Guarda las API keys en .env y recarga el APIFallbackBackend en caliente.
+
+    Espera: {"keys": {"OPENAI_API_KEY": "sk-...", "ANTHROPIC_API_KEY": "..."}}
+    Las keys vacias se ignoran (no se sobreescriben).
+    """
+    new_keys = payload.get("keys", {})
+    if not isinstance(new_keys, dict):
+        raise HTTPException(status_code=422, detail="'keys' must be an object")
+
+    # Validar que solo aceptamos env_vars conocidas
+    valid_env_vars = {p.env_var for p in PROVIDERS}
+    for k in new_keys:
+        if k not in valid_env_vars:
+            raise HTTPException(status_code=422, detail=f"Unknown env var: {k}")
+
+    # Leer .env actual y actualizar con los nuevos valores no vacios
+    current = _read_env_keys()
+    updated_count = 0
+    for k, v in new_keys.items():
+        v = (v or "").strip()
+        if v:
+            current[k] = v
+            updated_count += 1
+        # Si v es vacio, no tocamos el existente (para no borrar por error)
+
+    _write_env_keys(current)
+
+    # Recargar en caliente: las nuevas keys se aplican al proximo request
+    # via os.environ. APIFallbackBackend lee api_key_env al construirse.
+    for k, v in current.items():
+        if v:
+            os.environ[k] = v
+
+    logger.info("api_keys_updated", count=updated_count)
+    return {"updated": True, "count": updated_count, "note": "Keys aplicadas en caliente."}
+
+
+@app.post("/api/config/keys/clear")
+async def clear_keys(payload: dict[str, Any]) -> dict[str, Any]:
+    """Borra una key especifica del .env. Espera: {"env_var": "OPENAI_API_KEY"}."""
+    env_var = payload.get("env_var")
+    if not env_var:
+        raise HTTPException(status_code=422, detail="'env_var' required")
+    valid_env_vars = {p.env_var for p in PROVIDERS}
+    if env_var not in valid_env_vars:
+        raise HTTPException(status_code=422, detail=f"Unknown env var: {env_var}")
+
+    current = _read_env_keys()
+    current[env_var] = ""
+    _write_env_keys(current)
+    # Quitar de os.environ
+    os.environ.pop(env_var, None)
+    logger.info("api_key_cleared", env_var=env_var)
+    return {"cleared": True, "env_var": env_var}
+
+
+# ---------------------------------------------------------------------------
+# Model Manager — registrar y descargar Cerebro Local (Fase 6)
+# ---------------------------------------------------------------------------
+
+
+# Estado global de descarga activa (singleton en el proceso)
+_download_state: dict[str, Any] = {
+    "active": False,
+    "model_id": None,
+    "received_bytes": 0,
+    "total_bytes": 0,
+    "error": None,
+    "completed": False,
+}
+_download_lock = threading.Lock()
+
+
+@app.get("/api/models")
+async def list_models() -> dict[str, Any]:
+    """Lista los modelos registrados en el ModelManager."""
+    core = get_core()
+    if core._cortex_hub is None:
+        return {"models": [], "cortex_enabled": False}
+    mm = core._cortex_hub._mm
+    models = [m.to_dict() for m in mm.list_all()]
+    return {"models": models, "cortex_enabled": True}
+
+
+@app.post("/api/models/register")
+async def register_default_model(payload: dict[str, Any]) -> dict[str, Any]:
+    """Registra el modelo Qwen 2.5 3B por defecto (si no existe)."""
+    core = get_core()
+    if core._cortex_hub is None:
+        raise HTTPException(status_code=503, detail="Cortex Hub not enabled")
+    mm = core._cortex_hub._mm
+
+    model_id = payload.get("model_id", "qwen2.5-3b-instruct")
+    existing = mm.get(model_id)
+    if existing is not None:
+        return {"registered": True, "model_id": model_id, "already_existed": True}
+
+    mm.register(
+        model_id=model_id,
+        name="Qwen2.5-3B-Instruct",
+        filename="qwen2.5-3b-instruct-q4_k_m.gguf",
+        url="https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf",
+        format="gguf",
+        purpose="monologue",
+        quantization="Q4_K_M",
+    )
+    return {"registered": True, "model_id": model_id, "already_existed": False}
+
+
+@app.post("/api/models/download")
+async def start_download(payload: dict[str, Any]) -> dict[str, Any]:
+    """Inicia la descarga de un modelo en background. Devuelve inmediatamente.
+
+    El frontend debe pollear /api/models/download/status para ver el progreso.
+    """
+    global _download_state
+    core = get_core()
+    if core._cortex_hub is None:
+        raise HTTPException(status_code=503, detail="Cortex Hub not enabled")
+    mm = core._cortex_hub._mm
+
+    model_id = payload.get("model_id")
+    if not model_id:
+        raise HTTPException(status_code=422, detail="'model_id' required")
+
+    info = mm.get(model_id)
+    if info is None:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not registered")
+
+    with _download_lock:
+        if _download_state["active"]:
+            raise HTTPException(status_code=409, detail="Another download is already in progress")
+        _download_state = {
+            "active": True,
+            "model_id": model_id,
+            "received_bytes": 0,
+            "total_bytes": 0,
+            "error": None,
+            "completed": False,
+        }
+
+    def progress_cb(received: int, total: int) -> None:
+        with _download_lock:
+            _download_state["received_bytes"] = received
+            _download_state["total_bytes"] = total
+
+    def run_download() -> None:
+        global _download_state
+        try:
+            mm.download(model_id, progress_callback=progress_cb)
+            with _download_lock:
+                _download_state["completed"] = True
+                _download_state["active"] = False
+            logger.info("model_download_completed", model_id=model_id)
+        except Exception as e:
+            with _download_lock:
+                _download_state["error"] = str(e)
+                _download_state["active"] = False
+            logger.error("model_download_failed", model_id=model_id, error=str(e))
+
+    thread = threading.Thread(target=run_download, daemon=True, name="model-download")
+    thread.start()
+    return {"started": True, "model_id": model_id}
+
+
+@app.get("/api/models/download/status")
+async def download_status() -> dict[str, Any]:
+    """Devuelve el estado actual de la descarga activa (o la ultima)."""
+    with _download_lock:
+        state = dict(_download_state)
+    # Calcular porcentaje
+    if state["total_bytes"] > 0:
+        state["percent"] = round(100 * state["received_bytes"] / state["total_bytes"], 1)
+    else:
+        state["percent"] = 0
+    return state
 
 
 # ---------------------------------------------------------------------------

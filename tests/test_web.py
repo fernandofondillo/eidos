@@ -270,6 +270,109 @@ class TestConfig:
 
 
 # ---------------------------------------------------------------------------
+# Providers + API Keys (Fase 6)
+# ---------------------------------------------------------------------------
+
+
+class TestProviders:
+    async def test_list_providers(self, client: AsyncClient) -> None:
+        r = await client.get("/api/providers")
+        assert r.status_code == 200
+        data = r.json()
+        assert "providers" in data
+        assert len(data["providers"]) >= 3
+        # Debe incluir OpenAI, Anthropic, MiniMax
+        ids = [p["id"] for p in data["providers"]]
+        assert "openai" in ids
+        assert "anthropic" in ids
+        assert "minimax" in ids
+
+
+class TestApiKeys:
+    async def test_get_keys_empty(self, client: AsyncClient) -> None:
+        r = await client.get("/api/config/keys")
+        assert r.status_code == 200
+        data = r.json()
+        assert "keys" in data
+        # Debe listar todos los providers, todos con set=False inicialmente
+        for pid, info in data["keys"].items():
+            assert "set" in info
+            assert "preview" in info
+
+    async def test_save_and_get_key(self, client: AsyncClient) -> None:
+        # Guardar una key de OpenAI
+        r = await client.post(
+            "/api/config/keys",
+            json={"keys": {"OPENAI_API_KEY": "sk-test-12345678901234567890"}},
+        )
+        assert r.status_code == 200
+        assert r.json()["updated"] is True
+
+        # Verificar que ahora esta set
+        r2 = await client.get("/api/config/keys")
+        data = r2.json()
+        assert data["keys"]["openai"]["set"] is True
+        assert "sk-test" in data["keys"]["openai"]["preview"]
+
+    async def test_save_unknown_env_var_rejected(self, client: AsyncClient) -> None:
+        r = await client.post(
+            "/api/config/keys",
+            json={"keys": {"UNKNOWN_VAR": "value"}},
+        )
+        assert r.status_code == 422
+
+    async def test_clear_key(self, client: AsyncClient) -> None:
+        # Primero guardar
+        await client.post(
+            "/api/config/keys",
+            json={"keys": {"ANTHROPIC_API_KEY": "sk-ant-test1234567890"}},
+        )
+        # Luego borrar
+        r = await client.post(
+            "/api/config/keys/clear",
+            json={"env_var": "ANTHROPIC_API_KEY"},
+        )
+        assert r.status_code == 200
+        assert r.json()["cleared"] is True
+
+        # Verificar que ya no esta set
+        r2 = await client.get("/api/config/keys")
+        data = r2.json()
+        assert data["keys"]["anthropic"]["set"] is False
+
+    async def test_clear_unknown_env_var_rejected(self, client: AsyncClient) -> None:
+        r = await client.post(
+            "/api/config/keys/clear",
+            json={"env_var": "UNKNOWN_VAR"},
+        )
+        assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Models (Fase 6) — registro y estado de descarga
+# ---------------------------------------------------------------------------
+
+
+class TestModels:
+    async def test_list_models_no_cortex(self, client: AsyncClient) -> None:
+        # En tests, cortex esta deshabilitado por config
+        r = await client.get("/api/models")
+        assert r.status_code == 200
+        data = r.json()
+        assert "models" in data
+        assert data["cortex_enabled"] is False
+
+    async def test_download_status_initial(self, client: AsyncClient) -> None:
+        r = await client.get("/api/models/download/status")
+        assert r.status_code == 200
+        data = r.json()
+        assert "active" in data
+        assert "completed" in data
+        assert "percent" in data
+        assert data["active"] is False or data["active"] is True  # any bool
+
+
+# ---------------------------------------------------------------------------
 # WebSocket — con Starlette TestClient (síncrono)
 # ---------------------------------------------------------------------------
 

@@ -94,3 +94,10 @@ desktop/Cargo.lock
 
 # --- Python runtime data (created by web server) ---
 data/runtime/
+
+# --- Fase 6: Bootstrap Mágico — archivos generados por install.command ---
+.eidos_env/
+.env
+data/eidos_server.log
+data/runtime/
+.eidos_env/server.pid
