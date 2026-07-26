@@ -25,14 +25,14 @@ EIDOS no es un chatbot. Es un **organismo digital** con:
 | 1.1   | Estructura + Core Engine + MonologueGenerator (stub) | ✅ |
 | 1.2   | 5 capas de memoria (SQLite + sqlite-vec + grafo JSON) | ✅ |
 | 1.3   | Motivación intrínseca + consolidación background | ✅ |
-| **2** | **Cortex Hub — modelos GGUF locales + API fallback con PrivacyFilter** | ✅ **Esta release** |
-| 3     | Génesis dinámica de cápsulas + Tool Sandbox | ⏳ Próxima |
-| 4     | EIDOS MESH — enjambre y cooperación | ⏳ |
+| 2     | Cortex Hub — modelos GGUF locales + API fallback con PrivacyFilter | ✅ |
+| **3** | **Génesis dinámica de cápsulas + Tool Sandbox + EvolutionLoop** | ✅ **Esta release** |
+| 4     | EIDOS MESH — enjambre y cooperación | ⏳ Próxima |
 | 5     | UI Tauri v2 + empaquetado cross-platform | ⏳ |
 
 ---
 
-## 🚀 Quickstart (Fase 2)
+## 🚀 Quickstart (Fase 3)
 
 ### Requisitos
 
@@ -79,6 +79,15 @@ uv run eidos runs
 uv run eidos models list
 uv run eidos models download <model_id>
 uv run eidos models delete <model_id>
+
+# Gestión de cápsulas (Fase 3)
+uv run eidos capsules list
+uv run eidos capsules forge "experto en Kubernetes"
+uv run eidos capsules approve <draft_id>
+uv run eidos capsules reject <draft_id>
+uv run eidos capsules favorite <capsule_id>
+uv run eidos capsules evolution
+uv run eidos capsules sandbox-test "import math; print(math.sqrt(16))" --entry none
 
 # Estado del CortexHub (Fase 2)
 uv run eidos cortex status
@@ -292,6 +301,103 @@ Redactions: 2
 ### Lock singleton-virtual-ready (prepara Fase 4)
 
 `CortexHub.try_acquire_lock(role, ttl)` usa `fcntl.flock` local en Fase 2. En Fase 4 se sustituirá por `resource_token` MESH distribuido sin cambiar la API. Solo un proceso EIDOS puede tener el lock activo — evita que dos instancias carguen el modelo en VRAM a la vez.
+
+---
+
+## 🧬 Génesis de Cápsulas + Tool Sandbox (Fase 3)
+
+EIDOS puede **crear sus propias especializaciones** al vuelo. Si el usuario dice "conviértete en experto en X" y no existe la cápsula, EIDOS la forja, la valida, la prueba y la persiste.
+
+### Pipeline de génesis
+
+```
+Petición NL del usuario
+        ↓
+EvolutionLoop.detect_need()  ← patrones regex + heurística de monólogo
+        ↓
+CapsuleForge.forge()
+  1. Backend (Stub | LLM vía CortexHub) genera CapsuleDraft
+  2. Pydantic valida schema estricto
+  3. ToolSandbox ejecuta smoke test de tools (si las declara)
+  4. Decisión:
+     - AUTO_APPROVED si confidence > 0.85 Y smoke OK Y no tools peligrosos
+     - PENDING_APPROVAL en caso contrario
+     - REJECTED si smoke test falla
+  5. Persistencia: capsule_drafts (pendientes) o capsules (activas)
+```
+
+### ToolSandbox — defense-in-depth
+
+3 capas de seguridad para ejecutar código generado por EIDOS:
+
+| Capa | Mecanismo | Protección |
+|------|-----------|------------|
+| 1 | AST parsing | Rechaza `exec`/`eval`/`__import__`/`compile`/`open` + imports fuera de whitelist |
+| 2 | Subprocess aislado | `stdin=DEVNULL`, `stdout=PIPE`, timeout 5s, env restringido |
+| 3 | Resource limits (POSIX) | `RLIMIT_CPU` (1s), `RLIMIT_AS` (256MB), `RLIMIT_FSIZE` (1MB) |
+
+**Whitelist de módulos**: math, statistics, json, re, datetime, collections, itertools, functools, typing, dataclasses, enum, etc. **Prohibidos**: os, sys, subprocess, socket, http, urllib.
+
+```bash
+$ uv run eidos capsules sandbox-test "import os; os.system('echo hacked')"
+🧪 Sandbox test
+OK: ✗
+Security violations: 1
+  • Code rejected by AST validator: Import 'os' not in whitelist
+
+$ uv run eidos capsules sandbox-test "import math; print(math.factorial(10))" --entry none
+🧪 Sandbox test
+OK: ✓
+stdout: 3628800
+```
+
+### Aprobación humana (neuro-simbólico)
+
+EIDOS no ejecuta código sin supervisión. Lo neuronal (LLM) propone; lo simbólico (Pydantic + sandbox + reglas) valida. Reglas de auto-aprobación:
+
+- `genesis_confidence > 0.85`
+- Smoke test de tools pasa
+- Tool name no está en `HIGH_RISK_TOOL_NAMES` (exec_command, shell, delete, format, rm, fork_bomb)
+
+Si no se cumple → `pending_approval`. El usuario la aprueba vía CLI: `eidos capsules approve <id>`.
+
+### Promoción automática a favorita
+
+El `EvolutionLoop.check_promotions()` (ejecutado por el consolidador background) promueve a favorita cualquier cápsula que cumpla:
+
+- `uses >= 3` (configurable)
+- `last_used` dentro de las últimas 24h
+- No es ya favorita
+
+Las favoritas nunca expiran por TTL (caducidad).
+
+### Estructura de un .eidos
+
+```json
+{
+  "id": "550e8400-...",
+  "name": "Experto en Kubernetes",
+  "version": "1.0.0",
+  "ontology": {
+    "domain": "kubernetes",
+    "entities": ["pod", "deployment", "service"],
+    "relations": [{"subject": "deployment", "predicate": "manages", "object": "pod"}]
+  },
+  "rules": [
+    {"id": "r1", "condition": "Usuario pregunta sobre pods", "action": "Explicar pods", "priority": 1}
+  ],
+  "tone": {"style": "technical", "empathy": 5, "verbosity": 5},
+  "tools": [
+    {"name": "validate_yaml", "entry_point": "validate", "code": "def validate(yaml_str): ..."}
+  ],
+  "metadata": {
+    "ttl_days": 7,
+    "uses": 0,
+    "favorite": false,
+    "genesis_confidence": 0.85
+  }
+}
+```
 
 ---
 

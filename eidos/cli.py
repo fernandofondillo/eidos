@@ -66,6 +66,7 @@ def load_config(config_path: Path | None = None) -> dict:
 def build_core(config: dict, project_root: Path, start_consolidator: bool = True) -> EidosCore:
     core_cfg = config.get("core", {})
     cortex_cfg = config.get("cortex", {})
+    evolution_cfg = config.get("evolution", {})
     persist = core_cfg.get("persist_monologues", False)
     monologues_dir = (project_root / core_cfg.get("monologues_dir", "data/monologues")) if persist else None
     if monologues_dir is not None:
@@ -101,6 +102,35 @@ def build_core(config: dict, project_root: Path, start_consolidator: bool = True
         # Si hay CortexHub, usar 'auto' (degradará a stub si no hay modelos)
         backend_requested = "auto"
 
+    # Fase 3: CapsuleForge + EvolutionLoop
+    evolution_loop = None
+    if evolution_cfg.get("enabled", True):  # activo por defecto
+        from eidos.core.forge import CapsuleForge, StubForgeBackend
+        from eidos.core.evolution import EvolutionLoop
+        from eidos.core.sandbox import ToolSandbox
+
+        sandbox = ToolSandbox(
+            timeout_sec=float(evolution_cfg.get("sandbox_timeout_sec", 5)),
+            mem_limit_mb=int(evolution_cfg.get("sandbox_mem_mb", 256)),
+        )
+        # Backend del forge: stub por defecto; LLM si hay cortex_hub
+        forge_backend = StubForgeBackend()
+        if cortex_hub is not None:
+            from eidos.core.forge import LLMForgeBackend
+            forge_backend = LLMForgeBackend(cortex_hub=cortex_hub, sandbox=sandbox)
+
+        forge = CapsuleForge(
+            db_path=db_path,
+            procedural=memory.procedural,
+            backend=forge_backend,
+            sandbox=sandbox,
+        )
+        evolution_loop = EvolutionLoop(
+            forge=forge,
+            procedural=memory.procedural,
+            auto_forge=bool(evolution_cfg.get("auto_forge", True)),
+        )
+
     return EidosCore(
         monologue_backend=backend_requested,
         confidence_threshold=float(core_cfg.get("confidence_threshold", 0.6)),
@@ -111,6 +141,7 @@ def build_core(config: dict, project_root: Path, start_consolidator: bool = True
         consolidator=consolidator,
         auto_start_consolidator=start_consolidator,
         cortex_hub=cortex_hub,
+        evolution_loop=evolution_loop,
     )
 
 
@@ -513,6 +544,279 @@ def cortex_privacy_test(text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Subcomandos: capsules (Fase 3)
+# ---------------------------------------------------------------------------
+
+
+@main.group()
+@click.pass_context
+def capsules(ctx: click.Context) -> None:
+    """Gestión de cápsulas cognitivas (.eidos)."""
+    pass
+
+
+@capsules.command(name="list")
+@click.option("--status", default=None, help="Filtrar por status (pending, approved, rejected, auto_approved).")
+@click.pass_context
+def capsules_list(ctx: click.Context, status: str | None) -> None:
+    """Lista cápsulas y drafts."""
+    obj = ctx.obj or {}
+    config = obj.get("config") or load_config(None)
+    project_root = obj.get("project_root") or DEFAULT_CONFIG_PATH.resolve().parent.parent
+    configure_logging(level="WARNING", format="console")
+    memory = MemoryStore.from_config(config, project_root)
+
+    from eidos.core.forge import CapsuleForge, StubForgeBackend
+
+    forge = CapsuleForge(
+        db_path=memory.db_path,
+        procedural=memory.procedural,
+        backend=StubForgeBackend(),
+    )
+
+    # Drafts
+    drafts = forge.list_drafts(status=status)
+    if drafts:
+        dtable = Table(title=f"📝 Drafts ({len(drafts)})", show_header=True, header_style="bold yellow")
+        dtable.add_column("ID", style="dim")
+        dtable.add_column("Name", style="bold")
+        dtable.add_column("Status", style="yellow")
+        dtable.add_column("Confidence", style="white")
+        dtable.add_column("Smoke", style="white")
+        for d in drafts:
+            dtable.add_row(
+                d["id"][:8],
+                d["name"],
+                d["status"],
+                f"{d['genesis_confidence']:.2f}",
+                "✓" if d["smoke_test_passed"] else "✗",
+            )
+        console.print(dtable)
+    else:
+        console.print("[dim]No hay drafts.[/]")
+
+    # Cápsulas activas
+    all_caps = memory.procedural.list_all()
+    if all_caps:
+        ctable = Table(title=f"📦 Cápsulas activas ({len(all_caps)})", show_header=True, header_style="bold cyan")
+        ctable.add_column("ID", style="dim")
+        ctable.add_column("Name", style="bold")
+        ctable.add_column("Ver", style="white")
+        ctable.add_column("Uses", style="yellow")
+        ctable.add_column("Fav", style="magenta")
+        ctable.add_column("TTL", style="dim")
+        for c in all_caps:
+            ctable.add_row(
+                c.id[:8],
+                c.name,
+                c.version,
+                str(c.uses),
+                "★" if c.favorite else "",
+                f"{c.ttl_days}d",
+            )
+        console.print(ctable)
+    else:
+        console.print("[dim]No hay cápsulas activas.[/]")
+
+
+@capsules.command(name="forge")
+@click.argument("request")
+@click.option("--force-pending", is_flag=True, help="Forzar que quede pendiente de aprobación.")
+@click.pass_context
+def capsules_forge(ctx: click.Context, request: str, force_pending: bool) -> None:
+    """Forja una nueva cápsula a partir de una petición NL."""
+    obj = ctx.obj or {}
+    config = obj.get("config") or load_config(None)
+    project_root = obj.get("project_root") or DEFAULT_CONFIG_PATH.resolve().parent.parent
+    configure_logging(level="INFO", format="console")
+    memory = MemoryStore.from_config(config, project_root)
+
+    from eidos.core.forge import CapsuleForge, StubForgeBackend
+    from eidos.core.sandbox import ToolSandbox
+
+    forge = CapsuleForge(
+        db_path=memory.db_path,
+        procedural=memory.procedural,
+        backend=StubForgeBackend(),
+        sandbox=ToolSandbox(),
+    )
+    draft, decision = forge.forge(request, force_pending=force_pending)
+
+    console.print(
+        Panel(
+            f"[bold]ID:[/] {draft.id}\n"
+            f"[bold]Name:[/] {draft.name}\n"
+            f"[bold]Domain:[/] {draft.ontology.domain}\n"
+            f"[bold]Confidence:[/] {draft.genesis_confidence:.2f}\n"
+            f"[bold]Smoke test:[/] {'✓' if draft.smoke_test_passed else '✗'}\n"
+            f"[bold]Decision:[/] [yellow]{decision.value}[/]\n"
+            f"[bold]Tools:[/] {len(draft.tools)}",
+            title="🔨 Cápsula forjada",
+            border_style="green" if decision.value == "auto_approved" else "yellow",
+        )
+    )
+    if draft.smoke_test_output:
+        console.print(f"[dim]Smoke test output:[/]\n{draft.smoke_test_output}")
+
+
+@capsules.command(name="approve")
+@click.argument("draft_id")
+@click.pass_context
+def capsules_approve(ctx: click.Context, draft_id: str) -> None:
+    """Aprueba un draft pendiente → lo promueve a cápsula activa."""
+    obj = ctx.obj or {}
+    config = obj.get("config") or load_config(None)
+    project_root = obj.get("project_root") or DEFAULT_CONFIG_PATH.resolve().parent.parent
+    configure_logging(level="INFO", format="console")
+    memory = MemoryStore.from_config(config, project_root)
+
+    from eidos.core.forge import CapsuleForge, StubForgeBackend
+
+    forge = CapsuleForge(
+        db_path=memory.db_path,
+        procedural=memory.procedural,
+        backend=StubForgeBackend(),
+    )
+    # Permitir IDs parciales (primer match)
+    drafts = forge.list_drafts()
+    match = next((d for d in drafts if d["id"].startswith(draft_id)), None)
+    if match is None:
+        console.print(f"[red]Draft '{draft_id}' no encontrado.[/]")
+        return
+    ok = forge.approve(match["id"])
+    if ok:
+        console.print(f"[green]✓ Draft {match['id'][:8]} aprobado y promovido a cápsula activa.[/]")
+    else:
+        console.print(f"[red]No se pudo aprobar el draft {match['id'][:8]}.[/]")
+
+
+@capsules.command(name="reject")
+@click.argument("draft_id")
+@click.pass_context
+def capsules_reject(ctx: click.Context, draft_id: str) -> None:
+    """Rechaza un draft pendiente."""
+    obj = ctx.obj or {}
+    config = obj.get("config") or load_config(None)
+    project_root = obj.get("project_root") or DEFAULT_CONFIG_PATH.resolve().parent.parent
+    configure_logging(level="WARNING", format="console")
+    memory = MemoryStore.from_config(config, project_root)
+
+    from eidos.core.forge import CapsuleForge, StubForgeBackend
+
+    forge = CapsuleForge(
+        db_path=memory.db_path,
+        procedural=memory.procedural,
+        backend=StubForgeBackend(),
+    )
+    drafts = forge.list_drafts()
+    match = next((d for d in drafts if d["id"].startswith(draft_id)), None)
+    if match is None:
+        console.print(f"[red]Draft '{draft_id}' no encontrado.[/]")
+        return
+    ok = forge.reject(match["id"])
+    if ok:
+        console.print(f"[green]✓ Draft {match['id'][:8]} rechazado.[/]")
+    else:
+        console.print(f"[red]No se pudo rechazar el draft.[/]")
+
+
+@capsules.command(name="favorite")
+@click.argument("capsule_id")
+@click.pass_context
+def capsules_favorite(ctx: click.Context, capsule_id: str) -> None:
+    """Marca una cápsula como favorita (nunca expira)."""
+    obj = ctx.obj or {}
+    config = obj.get("config") or load_config(None)
+    project_root = obj.get("project_root") or DEFAULT_CONFIG_PATH.resolve().parent.parent
+    configure_logging(level="WARNING", format="console")
+    memory = MemoryStore.from_config(config, project_root)
+
+    all_caps = memory.procedural.list_all()
+    match = next((c for c in all_caps if c.id.startswith(capsule_id)), None)
+    if match is None:
+        console.print(f"[red]Cápsula '{capsule_id}' no encontrada.[/]")
+        return
+    memory.procedural.set_favorite(match.id, True)
+    console.print(f"[green]✓ Cápsula '{match.name}' marcada como favorita ★[/]")
+
+
+@capsules.command(name="evolution")
+@click.pass_context
+def capsules_evolution(ctx: click.Context) -> None:
+    """Estadísticas del EvolutionLoop."""
+    obj = ctx.obj or {}
+    config = obj.get("config") or load_config(None)
+    project_root = obj.get("project_root") or DEFAULT_CONFIG_PATH.resolve().parent.parent
+    configure_logging(level="WARNING", format="console")
+    memory = MemoryStore.from_config(config, project_root)
+
+    from eidos.core.evolution import EvolutionLoop
+    from eidos.core.forge import CapsuleForge, StubForgeBackend
+
+    forge = CapsuleForge(
+        db_path=memory.db_path,
+        procedural=memory.procedural,
+        backend=StubForgeBackend(),
+    )
+    evo = EvolutionLoop(forge=forge, procedural=memory.procedural)
+    s = evo.stats()
+
+    table = Table(title="🧬 EIDOS — Evolution Stats", show_header=True, header_style="bold green")
+    table.add_column("Métrica", style="bold")
+    table.add_column("Valor", style="white")
+    table.add_row("Auto-forge", "✓ ON" if s["auto_forge_enabled"] else "✗ OFF")
+    table.add_row("Cápsulas totales", str(s["total_capsules"]))
+    table.add_row("Favoritas", str(s["favorites"]))
+    table.add_row("Candidatas a promoción", str(s["promotion_candidates"]))
+    table.add_row("Threshold promoción", f"{s['promotion_threshold']} usos / {s['promotion_window_hours']}h")
+    console.print(table)
+
+    # Ejecutar check_promotions para mostrar/realizar promociones
+    promoted = evo.check_promotions()
+    if promoted:
+        console.print(f"\n[green]✓ {len(promoted)} cápsula(s) promovida(s) a favorita esta ejecución.[/]")
+    else:
+        console.print("\n[dim]No hay promociones pendientes.[/]")
+
+
+@capsules.command(name="sandbox-test")
+@click.argument("code", required=False)
+@click.option("--file", "file_path", type=click.Path(exists=True, path_type=Path), default=None, help="Leer código desde archivo.")
+@click.option("--entry", default="main", help="Función entry point.")
+@click.pass_context
+def capsules_sandbox_test(ctx: click.Context, code: str | None, file_path: Path | None, entry: str) -> None:
+    """Prueba el ToolSandbox con código Python."""
+    from eidos.core.sandbox import ToolSandbox
+
+    if file_path:
+        code = file_path.read_text(encoding="utf-8")
+    elif not code:
+        console.print("[red]Debes pasar CODE o --file PATH.[/]")
+        return
+
+    sb = ToolSandbox(timeout_sec=5)
+    result = sb.run_code(code, entry=entry if entry != "none" else None)
+    console.print(
+        Panel(
+            f"[bold]OK:[/] {'✓' if result.ok else '✗'}\n"
+            f"[bold]Exit code:[/] {result.exit_code}\n"
+            f"[bold]Duration:[/] {result.duration_ms} ms\n"
+            f"[bold]Security violations:[/] {len(result.security_violations)}",
+            title="🧪 Sandbox test",
+            border_style="green" if result.ok else "red",
+        )
+    )
+    if result.stdout:
+        console.print(f"[bold]stdout:[/]\n{result.stdout}")
+    if result.stderr:
+        console.print(f"[bold red]stderr:[/]\n{result.stderr}")
+    if result.security_violations:
+        console.print(f"[bold red]Violations:[/]")
+        for v in result.security_violations:
+            console.print(f"  • {v}")
+
+
+# ---------------------------------------------------------------------------
 # Handler de turnos
 # ---------------------------------------------------------------------------
 
@@ -549,6 +853,23 @@ def _handle_turn(core: EidosCore, user_input: str) -> None:
         )
     )
     console.print(f"[{reward_color}]reward Δ {response.reward_delta:+.4f}[/{reward_color}]")
+
+    # Fase 3: si el turno disparó génesis de cápsula
+    if response.evolution_event:
+        ev = response.evolution_event
+        ev_color = "green" if ev.get("decision") == "auto_approved" else "yellow"
+        console.print(
+            Panel(
+                f"[bold]Topic:[/] {ev.get('topic', '?')}\n"
+                f"[bold]Decision:[/] [{ev_color}]{ev.get('decision', '?')}[/{ev_color}]\n"
+                + (f"[bold]Draft ID:[/] {ev.get('draft_id', '?')[:8]}\n" if ev.get("draft_id") else "")
+                + (f"[bold]Name:[/] {ev.get('name', '?')}\n" if ev.get("name") else "")
+                + (f"[bold]Confidence:[/] {ev.get('confidence', 0):.2f}\n" if ev.get("confidence") else "")
+                + (f"[dim]{ev.get('error')}[/]" if ev.get("error") else ""),
+                title="🧬 Evolution triggered",
+                border_style=ev_color,
+            )
+        )
 
 
 if __name__ == "__main__":

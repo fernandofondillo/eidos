@@ -1,4 +1,4 @@
-"""EidosCore — orquestador principal del núcleo cognitivo. Fase 2.
+"""EidosCore — orquestador principal del núcleo cognitivo. Fase 3.
 
 Pipeline completo:
     user_input
@@ -10,10 +10,10 @@ Pipeline completo:
       → MetacognitiveMemory.store(monologue, route)
       → ActionRouter → Route
       → EpisodicMemory.search() si route == SEARCH_MEMORY
-          (Fase 2: usa embeddings reales del CortexHub si available)
       → (NLG/acción) → Response
       → SensoryMemory.store(response)
       → EpisodicMemory.store(interaction)
+      → EvolutionLoop.process_turn()  # Fase 3: detecta necesidad de cápsulas
 
 Background:
     Consolidator (hilo daemon) cada 5 min:
@@ -21,6 +21,7 @@ Background:
       - indexa monólogos huérfanos
       - infiere outcomes pendientes
       - expira cápsulas por TTL
+      - Fase 3: promueve cápsulas populares a favoritas (EvolutionLoop.check_promotions)
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from eidos.core.consolidator import Consolidator
+from eidos.core.evolution import EvolutionLoop
 from eidos.core.monologue import Monologue, MonologueGenerator
 from eidos.core.motivation import MotivationModule
 from eidos.core.router import ActionRouter, Route
@@ -52,6 +54,8 @@ class Response(BaseModel):
     reward_delta: float = 0.0
     # Fase 2: backend usado para generar el monólogo
     monologue_backend: str = "stub"
+    # Fase 3: si el turno disparó génesis de cápsula
+    evolution_event: dict[str, Any] | None = None
 
 
 class EidosCore:
@@ -69,6 +73,7 @@ class EidosCore:
         auto_start_consolidator: bool = True,
         cortex_hub: Any = None,
         cortex_monologue_client: Any = None,
+        evolution_loop: EvolutionLoop | None = None,
     ) -> None:
         """
         Args:
@@ -79,6 +84,8 @@ class EidosCore:
                 backend='auto', se usa stub.
             cortex_monologue_client: opcional, inyecta un LlamaClient en
                 el backend del CortexHub (tests).
+            evolution_loop: instancia de EvolutionLoop (Fase 3). Si es None,
+                no se detectan necesidades de cápsulas automáticamente.
         """
         self._monologues_dir = monologues_dir
         self._memory = memory
@@ -86,6 +93,7 @@ class EidosCore:
         self._consolidator = consolidator
         self._cortex_hub = cortex_hub
         self._cortex_client = cortex_monologue_client
+        self._evolution_loop = evolution_loop
         self._max_plan_steps = max_plan_steps
 
         # Resolver backend real
@@ -110,6 +118,7 @@ class EidosCore:
             motivation=bool(motivation),
             consolidator=bool(consolidator),
             cortex=bool(cortex_hub),
+            evolution=bool(evolution_loop),
         )
 
     def _resolve_backend(
@@ -245,6 +254,20 @@ class EidosCore:
             except Exception as e:
                 logger.warning("eidos_episodic_store_failed", error=str(e))
 
+        # 7. Fase 3: EvolutionLoop — detecta necesidad de cápsulas
+        evolution_event: dict[str, Any] | None = None
+        if self._evolution_loop is not None:
+            try:
+                evolution_event = self._evolution_loop.process_turn(user_input, monologue)
+                if evolution_event is not None:
+                    logger.info(
+                        "eidos_evolution_triggered",
+                        topic=evolution_event.get("topic"),
+                        decision=evolution_event.get("decision"),
+                    )
+            except Exception as e:
+                logger.warning("eidos_evolution_failed", error=str(e))
+
         return Response(
             text=text,
             monologue_id=monologue.id,
@@ -253,6 +276,7 @@ class EidosCore:
             memory_context=memory_context,
             reward_delta=round(reward_delta, 4),
             monologue_backend=monologue.backend,
+            evolution_event=evolution_event,
         )
 
     def shutdown(self) -> None:

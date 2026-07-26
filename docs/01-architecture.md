@@ -95,7 +95,7 @@ Multi-instancia cooperativa en un mismo dispositivo:
 - ✅ **Fase 1.2**: 5 capas de memoria (SQLite + sqlite-vec + networkx + .eidos). 74 tests.
 - ✅ **Fase 1.3**: Motivación intrínseca (3 drivers) + consolidador background. 108 tests.
 - ✅ **Fase 2**: Cortex Hub (ModelManager + LlamaCppBackend + Embeddings + APIFallback + PrivacyFilter). 158 tests.
-- ⏳ Fase 3: Génesis de cápsulas + Tool Sandbox.
+- ✅ **Fase 3**: Génesis de cápsulas + Tool Sandbox (defense-in-depth) + EvolutionLoop. 229 tests.
 - ⏳ Fase 4: EIDOS MESH (sockets UNIX + leader election + arbitraje).
 - ⏳ Fase 5: UI Tauri v2 + empaquetado cross-platform.
 
@@ -218,3 +218,98 @@ em = EpisodicMemory(db_path)                                # stub (default)
 ```
 
 Cuando CortexHub tiene un modelo de embeddings READY, EpisodicMemory usa embeddings reales (dim 384 típica para BGE-small). Si no, degrada a `stub_embed` (dim 256). La tabla `vec0` se crea con la dim del embedder al primer arranque.
+
+## 9. Génesis de Cápsulas + Tool Sandbox (Fase 3)
+
+### ToolSandbox — defense-in-depth
+
+```python
+sandbox = ToolSandbox(timeout_sec=5, mem_limit_mb=256, cpu_limit_sec=2)
+result = sandbox.run_code(code, entry="main", args={})
+```
+
+3 capas:
+
+1. **AST validation** (`_ASTValidator`):
+   - Whitelist de imports: math, statistics, json, re, datetime, collections, itertools, functools, typing, dataclasses, enum, etc.
+   - Rechaza: `exec`, `eval`, `compile`, `__import__`, `open`, `globals`, `locals`, `vars`, `input`, `breakpoint`.
+   - Rechaza attribute access a `__builtins__`, `__subclasses__`, `__globals__`, `__code__`, etc.
+   - Permite dunders legítimos: `__init__`, `__str__`, `__len__`, `__iter__`, `__call__`, etc.
+
+2. **Subprocess aislado**:
+   - `stdin=DEVNULL`, `stdout=PIPE`, `stderr=PIPE`.
+   - `timeout` agresivo (default 5s).
+   - Environment restringido: solo `PATH`.
+   - Wrapper Python que carga el código + llama `entry(**args)`.
+   - Builtins peligrosos filtrados del namespace del subprocess.
+
+3. **Resource limits (POSIX)**:
+   - `RLIMIT_CPU` (default 2s).
+   - `RLIMIT_AS` (default 256MB).
+   - `RLIMIT_FSIZE` (1MB).
+   - Best-effort: en macOS RLIMIT_AS no siempre funciona, pero el timeout y la CPU limit siguen activos.
+
+### CapsuleForge — pipeline de génesis
+
+```python
+forge = CapsuleForge(db_path, procedural, backend=StubForgeBackend(), sandbox=ToolSandbox())
+draft, decision = forge.forge("experto en Kubernetes")
+# decision ∈ {AUTO_APPROVED, PENDING_APPROVAL, REJECTED}
+```
+
+Reglas de auto-aprobación (neuro-simbólico):
+
+```python
+def _should_auto_approve(draft):
+    if draft.genesis_confidence < 0.85: return False
+    if not draft.smoke_test_passed: return False
+    for tool in draft.tools:
+        if tool.name.lower() in HIGH_RISK_TOOL_NAMES:
+            return False  # exec_command, shell, delete, format, rm, fork_bomb
+    return True
+```
+
+Persistencia dual:
+- `capsule_drafts` (migración 0004): todos los drafts con status (pending, approved, rejected, auto_approved).
+- `capsules` (migración 0001, Fase 1.2): cápsulas activas tras aprobación.
+
+### EvolutionLoop — detección + promoción
+
+```python
+evo = EvolutionLoop(forge, procedural, auto_forge=True)
+evo.process_turn(user_input, monologue)  # detecta y forja si procede
+evo.check_promotions()  # promueve cápsulas populares a favoritas
+```
+
+Patrones NL de detección (regex):
+
+- `conviértete en experto en X`
+- `necesito que seas experto en X`
+- `crea una cápsula para X`
+- `actúa como experto en X`
+
+Promoción a favorita (background):
+
+- `uses >= 3` (configurable `PROMOTION_USES_THRESHOLD`)
+- `last_used` dentro de las últimas 24h (`PROMOTION_WINDOW_HOURS`)
+- No es ya favorita
+- Las favoritas nunca expiran por TTL
+
+### Tablas SQLite (migración 0004)
+
+```sql
+capsule_drafts(
+    id TEXT PRIMARY KEY,
+    requested_by TEXT,         -- 'user' | 'auto_evolution'
+    request_input TEXT,        -- petición NL original
+    name, version, description,
+    ontology JSON, rules JSON, tone JSON, tools JSON,
+    genesis_confidence REAL,
+    smoke_test_passed INTEGER,
+    smoke_test_output TEXT,
+    status TEXT,               -- 'pending' | 'approved' | 'rejected' | 'auto_approved'
+    created_at, decided_at,
+    parent_capsule_id TEXT,    -- genealogía
+    metadata JSON
+)
+```
