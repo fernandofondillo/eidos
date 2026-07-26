@@ -92,9 +92,44 @@ Multi-instancia cooperativa en un mismo dispositivo:
 ## 5. Roadmap de fases
 
 - ✅ **Fase 1.1**: Core Engine + MonologueGenerator (stub). Tests verdes.
-- ⏳ Fase 1.2: 5 capas de memoria.
+- ✅ **Fase 1.2**: 5 capas de memoria (SQLite + sqlite-vec + networkx + .eidos). 74 tests.
 - ⏳ Fase 1.3: Motivación intrínseca + consolidación background.
 - ⏳ Fase 2: Cortex Hub (Qwen2.5-3B local, llama-cpp-python).
 - ⏳ Fase 3: Génesis de cápsulas + Tool Sandbox.
 - ⏳ Fase 4: EIDOS MESH (sockets UNIX + leader election + arbitraje).
 - ⏳ Fase 5: UI Tauri v2 + empaquetado cross-platform.
+
+## 6. Memoria cognitiva (Fase 1.2) — detalle de implementación
+
+### Tablas SQLite (migración 0001)
+
+```sql
+sensory_events     -- Capa 1: (id, ts, kind, content, metadata)
+episodic_events    -- Capa 2: (id, ts, kind, content, embedding, importance, metadata)
+                   -- + virtual table episodic_vec (vec0) si sqlite-vec disponible
+capsules           -- Capa 4: (id, name, version, file_path, ttl_days, uses, favorite, ...)
+monologue_index    -- Capa 5: (id, ts, input_summary, hypothesis, plan, risk, confidence, route_type, outcome)
+schema_migrations  -- bookkeeping de migraciones
+```
+
+### Embeddings stub
+
+```python
+def stub_embed(text: str, dim: int = 256) -> list[float]:
+    """Bag-of-words hasheado + L2 normalize. Determinista, sin GPU.
+    Fase 2 lo sustituye por embeddings del Cortex Hub."""
+```
+
+### TTL de cápsulas
+
+- Cada cápsula nace con `ttl_days` (default 7).
+- `last_used` se actualiza cada vez que se invoca.
+- Expiración: si `favorite == False` y `(now - last_used or created_at).days >= ttl_days`.
+- El consolidador (Fase 1.3) llamará `expire_due()` y las eliminará.
+- `favorite == True` → nunca expira.
+
+### Degradación graceful
+
+- **sqlite-vec no instalado** → EpisodicMemory degrada a bruteforce cosine en Python. Más lento pero funcional. Log de aviso al arranque.
+- **networkx no instalado** → SemanticMemory lanza RuntimeError con instrucciones claras al instanciarse (no silence failure).
+- **DB corrupta** → migraciones idempotentes, no rompen el arranque.

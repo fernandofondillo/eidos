@@ -22,9 +22,9 @@ EIDOS no es un chatbot. Es un **organismo digital** con:
 
 | Fase | Descripción | Estado |
 |------|-------------|--------|
-| **1.1** | Estructura + Core Engine + MonologueGenerator (stub) | ✅ **Esta release** |
-| 1.2   | 5 capas de memoria (SQLite + sqlite-vec + grafo JSON) | ⏳ Próxima |
-| 1.3   | Motivación intrínseca + consolidación background | ⏳ |
+| 1.1   | Estructura + Core Engine + MonologueGenerator (stub) | ✅ |
+| **1.2** | **5 capas de memoria (SQLite + sqlite-vec + grafo JSON)** | ✅ **Esta release** |
+| 1.3   | Motivación intrínseca + consolidación background | ⏳ Próxima |
 | 2     | Cortex Hub — modelos GGUF/ONNX locales | ⏳ |
 | 3     | Génesis dinámica de cápsulas + Tool Sandbox | ⏳ |
 | 4     | EIDOS MESH — enjambre y cooperación | ⏳ |
@@ -32,7 +32,7 @@ EIDOS no es un chatbot. Es un **organismo digital** con:
 
 ---
 
-## 🚀 Quickstart (Fase 1.1)
+## 🚀 Quickstart (Fase 1.2)
 
 ### Requisitos
 
@@ -57,11 +57,14 @@ uv sync --extra dev
 ### Uso
 
 ```bash
-# REPL interactivo — visualiza el monólogo interno en vivo
+# REPL interactivo — visualiza el monólogo interno + contexto de memoria en vivo
 uv run eidos
 
 # Una sola consulta
 uv run eidos --once "¿Qué es EIDOS?"
+
+# Estadísticas de las 5 capas de memoria
+uv run eidos stats
 
 # Con config custom
 uv run eidos --config /path/to/eidos.yaml
@@ -139,6 +142,24 @@ metacognitiva (Fase 1.3) pueda responder *"¿por qué decidí X hace 3 días?"*.
 
 ---
 
+## 🧩 Memoria cognitiva de 5 capas (Fase 1.2)
+
+| # | Capa | Nombre | Backend | Propósito |
+|---|------|--------|---------|-----------|
+| 1 | Sensorial | Working memory | `deque` + SQLite | Contexto inmediato (últimos 50 eventos) |
+| 2 | Episódica | Hipocampo | sqlite-vec + SQLite | "Qué pasó y cuándo" — vectorial |
+| 3 | Semántica | Corteza | networkx → JSON | Grafo de conocimiento |
+| 4 | Procedimental | Cerebelo | SQLite + `.eidos` files | Cápsulas y herramientas |
+| 5 | Metacognitiva | Lóbulo Frontal | SQLite | Índice de monólogos pasados |
+
+**Persistencia unificada** en un único `data/eidos.db` (máxima portabilidad pendrive) + `data/graph.json` + `data/capsules/*.eidos`.
+
+**Embeddings stub**: en Fase 1.2 se usa un embedding determinista (bag-of-words + hash normalizado L2). Permite probar la capa vectorial sin GPU. En Fase 2 se sustituye por embeddings reales del Cortex Hub.
+
+**TTL de cápsulas**: las cápsulas no-favoritas expiran si no se usan en `ttl_days` (default 7). El consolidador (Fase 1.3) las poda automáticamente. Las marcadas `favorite=true` nunca expiran.
+
+---
+
 ## 📁 Estructura del repo
 
 ```
@@ -150,16 +171,30 @@ eidos/
 │       └── capsule.schema.json # Schema de cápsulas .eidos (Fase 3)
 ├── eidos/                      # Paquete Python
 │   ├── core/
-│   │   ├── engine.py           # EidosCore
+│   │   ├── engine.py           # EidosCore (con integración MemoryStore)
 │   │   ├── monologue.py        # Monologue + MonologueGenerator
 │   │   └── router.py           # ActionRouter + Route
-│   ├── memory/                 # (Fase 1.2)
+│   ├── memory/
+│   │   ├── base.py             # Interfaz MemoryLayer
+│   │   ├── sensory.py          # Capa 1
+│   │   ├── episodic.py         # Capa 2 (sqlite-vec + bruteforce fallback)
+│   │   ├── semantic.py         # Capa 3 (networkx)
+│   │   ├── procedural.py       # Capa 4 (cápsulas .eidos)
+│   │   ├── metacognitive.py    # Capa 5 (índice monólogos)
+│   │   └── store.py            # Fachada MemoryStore
 │   ├── cortex/                 # (Fase 2)
 │   ├── utils/
-│   │   └── logging.py          # structlog wrapper
-│   └── cli.py                  # REPL con rich
+│   │   ├── logging.py          # structlog wrapper
+│   │   └── persistence.py      # Migraciones SQL versionadas
+│   └── cli.py                  # REPL con rich + comando `stats`
 ├── data/                       # Persistencia portable (¡NUNCA al git!)
-├── tests/                      # pytest
+│   ├── eidos.db                # SQLite principal (4 tablas + vec)
+│   ├── graph.json              # Grafo semántico
+│   ├── monologues/             # JSONs de cada monólogo
+│   ├── capsules/               # Archivos .eidos
+│   └── migrations/             # SQL versionado
+│       └── 0001_initial.sql
+├── tests/                      # 74 tests pytest
 └── docs/
     ├── 01-architecture.md
     └── deployment-portable.md

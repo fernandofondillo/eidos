@@ -21,19 +21,21 @@ classifiers = [
 ]
 
 # Fase 1.1 — Dependencias mínimas para el Core Engine + MonologueGenerator (stub)
+# Fase 1.2 — + networkx y sqlite-vec para las 5 capas de memoria
 dependencies = [
     "pydantic>=2.5.0,<3.0.0",        # Schemas del monólogo y futuras cápsulas
     "pyyaml>=6.0",                    # Config maestra (vibe-coding friendly)
     "structlog>=24.1.0",              # Logging estructurado
     "rich>=13.7.0",                   # CLI bonita para visualizar el monólogo
     "click>=8.1.0",                   # CLI framework
+    "networkx>=3.2",                  # Capa semántica — grafo de conocimiento
+    "sqlite-vec>=0.1.6",              # Capa episódica — vectorial (con fallback bruteforce)
 ]
 
 [project.optional-dependencies]
 # Fase 2 — Cortex Hub (no se instalan todavía, documentación del upgrade path)
 cortex = [
     "llama-cpp-python>=0.3.0",
-    "sqlite-vec>=0.1.0",
 ]
 # Fase 4 — EIDOS MESH
 mesh = [
