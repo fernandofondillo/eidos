@@ -107,6 +107,51 @@ fi
 echo ""
 
 # ============================================================================
+# 3.5 Red de Seguridad — Xcode Command Line Tools (CLT)
+# ============================================================================
+# Apple exige las CLT para compilar librerías nativas (como llama-cpp-python
+# con Metal). Si no están instaladas, las instalamos de forma nativa vía
+# xcode-select --install, pausamos para que el usuario interactúe con la
+# ventana oficial de Apple, y re-verificamos. Si el usuario cancela, EIDOS
+# simplemente funcionará en modo CPU (sin Metal) — nunca aborta.
+
+echo -e "${BOLD}3.5 Herramientas de Apple (Red de Seguridad)${NC}"
+
+# Detección silenciosa: xcode-select -p devuelve 0 si CLT está instalado.
+XCODE_CLT_INSTALLED=false
+if xcode-select -p > /dev/null 2>&1; then
+    XCODE_CLT_INSTALLED=true
+    echo -e "  ${GREEN}✓${NC} Xcode Command Line Tools ya instaladas"
+else
+    echo -e "  ${DIM}Las Herramientas de línea de comandos de Apple no están presentes.${NC}"
+    echo -e "  ${DIM}Solicitando instalación oficial...${NC}"
+
+    # Activación nativa: abre la ventana oficial de macOS.
+    xcode-select --install > /dev/null 2>&1 || true
+
+    # Pausa y guía humana: el script se detiene hasta que el usuario pulse ENTER.
+    echo ""
+    echo -e "  ${YELLOW}${BOLD}⚠️  EIDOS necesita una herramienta oficial de Apple para funcionar a máxima velocidad.${NC}"
+    echo -e "  ${YELLOW}Se acaba de abrir una ventana en tu pantalla.${NC}"
+    echo -e "  ${YELLOW}👉 Por favor, haz clic en 'Instalar' en esa ventana y acepta los términos.${NC}"
+    echo -e "  ${YELLOW}⏳  Cuando termine la descarga e instalación, vuelve a esta ventana y pulsa la tecla ENTER para continuar.${NC}"
+    echo ""
+    read -p "  Pulsa ENTER cuando la instalación de Apple haya terminado..." _dummy
+
+    # Re-verificación tras el ENTER del usuario.
+    if xcode-select -p > /dev/null 2>&1; then
+        XCODE_CLT_INSTALLED=true
+        echo -e "  ${GREEN}✓${NC} Xcode Command Line Tools instaladas correctamente"
+    else
+        echo -e "  ${YELLOW}⚠${NC}  Parece que las herramientas no se terminaron de instalar."
+        echo -e "  ${DIM}No te preocupes: EIDOS se instalará en modo compatible (CPU).${NC}"
+        echo -e "  ${DIM}Podrás activar Metal más tarde desde el Panel de Configuración de la App.${NC}"
+        XCODE_CLT_INSTALLED=false
+    fi
+fi
+echo ""
+
+# ============================================================================
 # 4. Descarga e instalación de Python portable (python-build-standalone)
 # ============================================================================
 
@@ -226,21 +271,31 @@ echo ""
 # ============================================================================
 # 9. Pregunta: ¿Compilar llama-cpp-python con Metal (GPU)?
 # ============================================================================
+# Red de Seguridad: solo ofrecemos Metal si las CLT de Apple están instaladas
+# (sección 3.5). Si el usuario las canceló o fallaron, saltamos directamente
+# al modo CPU sin preguntar, para no generar expectativas que no se cumplirán.
 
 COMPILE_METAL=false
 if [[ "$WANT_CORTEX" == true && "$ARCH" == "arm64" ]]; then
-    echo -e "${BOLD}9. Aceleración por GPU (Metal)${NC}"
-    echo -e "  ${DIM}En Apple Silicon, EIDOS puede usar la GPU para pensar 5-10x más rápido.${NC}"
-    echo -e "  ${DIM}Esto requiere compilar una librería (~3 minutos).${NC}"
-    read -p "  ¿Compilar con aceleración Metal? (Recomendado en M1/M2/M3/M4) [s/N]: " COMPILE
-    COMPILE="${COMPILE:-N}"
-    if [[ "$COMPILE" =~ ^[sS]$ ]]; then
-        COMPILE_METAL=true
-        echo -e "  ${GREEN}✓${NC} Se compilará con Metal."
+    if [[ "$XCODE_CLT_INSTALLED" == true ]]; then
+        echo -e "${BOLD}9. Aceleración por GPU (Metal)${NC}"
+        echo -e "  ${DIM}En Apple Silicon, EIDOS puede usar la GPU para pensar 5-10x más rápido.${NC}"
+        echo -e "  ${DIM}Esto requiere compilar una librería (~3 minutos).${NC}"
+        read -p "  ¿Compilar con aceleración Metal? (Recomendado en M1/M2/M3/M4) [s/N]: " COMPILE
+        COMPILE="${COMPILE:-N}"
+        if [[ "$COMPILE" =~ ^[sS]$ ]]; then
+            COMPILE_METAL=true
+            echo -e "  ${GREEN}✓${NC} Se compilará con Metal."
+        else
+            echo -e "  ${DIM}No se compilará con Metal. EIDOS usará CPU (más lento).${NC}"
+        fi
+        echo ""
     else
-        echo -e "  ${DIM}No se compilará con Metal. EIDOS usará CPU (más lento).${NC}"
+        echo -e "${BOLD}9. Aceleración por GPU (Metal) — omitida${NC}"
+        echo -e "  ${YELLOW}⚠${NC}  Las Herramientas de Apple no están instaladas, así que no podemos compilar con Metal."
+        echo -e "  ${DIM}EIDOS funcionará en modo compatible (CPU). Podrás activar Metal más tarde.${NC}"
+        echo ""
     fi
-    echo ""
 fi
 
 # ============================================================================
@@ -366,12 +421,29 @@ echo ""
 
 if [[ "$WANT_CORTEX" == true ]]; then
     echo -e "${BOLD}Descargando Cerebro Local (Qwen 2.5 3B)...${NC}"
+
     if [[ "$COMPILE_METAL" == true ]]; then
         echo -e "  ${DIM}Compilando llama-cpp-python con Metal (esto tarda ~3 min)...${NC}"
-        CMAKE_ARGS="-DGGML_METAL=on" "$UV_BIN" pip install llama-cpp-python >/dev/null 2>&1 || {
-            echo -e "  ${YELLOW}⚠${NC}  No se pudo compilar llama-cpp-python. EIDOS usará APIs externas."
-        }
+        # Fallback Elegante (Anti-Fallo): envolvemos en if ! ... then.
+        # Si la compilación con Metal falla por cualquier razón (C++, permisos,
+        # versiones, etc.), el script NO ABORTA. Caemos a modo CPU y seguimos.
+        if ! CMAKE_ARGS="-DGGML_METAL=on" "$UV_BIN" sync --extra cortex >/dev/null 2>&1; then
+            echo -e "  ${YELLOW}⚙️  Activando modo de compatibilidad (CPU).${NC}"
+            echo -e "  ${YELLOW}No te preocupes, EIDOS funcionará perfectamente y guardará toda tu memoria.${NC}"
+            echo -e "  ${YELLOW}Podrás intentar activar la aceleración Metal más tarde desde el Panel de Configuración de la App.${NC}"
+            echo ""
+            echo -e "  ${DIM}Instalando cortex en modo CPU...${NC}"
+            # Sin CMAKE_ARGS: instalación pura CPU, sin abortar si también falla.
+            "$UV_BIN" sync --extra cortex >/dev/null 2>&1 || true
+        else
+            echo -e "  ${GREEN}✓${NC} llama-cpp-python compilado con Metal (GPU activa)"
+        fi
+    else
+        # El usuario no pidió Metal (o no tenía CLT): instalar cortex en modo CPU.
+        echo -e "  ${DIM}Instalando dependencias del cerebro local (modo CPU)...${NC}"
+        "$UV_BIN" sync --extra cortex >/dev/null 2>&1 || true
     fi
+
     # Descargar el modelo GGUF usando el CLI de EIDOS
     # Registramos el modelo y lo descargamos
     "$VENV_DIR/bin/python" -c "

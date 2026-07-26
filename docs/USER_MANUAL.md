@@ -11,14 +11,15 @@ Bienvenido. Este manual te explica, en lenguaje cercano y sin tecnicismos, cómo
 1. [¿Qué es EIDOS?](#1-qué-es-eidos)
 2. [La Magia del SSD](#2-la-magia-del-ssd)
 3. [Guía Paso a Paso: Desde cero hasta tu primera pregunta](#3-guía-paso-a-paso)
-4. [El Panel de Control](#4-el-panel-de-control)
-5. [El Monólogo Interno de EIDOS](#5-el-monólogo-interno-de-eidos)
-6. [Cápsulas: cuando EIDOS se especializa](#6-cápsulas-cuando-eidos-se-especializa)
-7. [Casos de Uso Prácticos (El Recetario)](#7-casos-de-uso-prácticos-el-recetario)
-8. [El Enjambre MESH](#8-el-enjambre-mesh)
-9. [Configuración: API Keys y Cerebro Local](#9-configuración-api-keys-y-cerebro-local)
-10. [Resolución de Problemas](#10-resolución-de-problemas)
-11. [Preguntas Frecuentes](#11-preguntas-frecuentes)
+4. [🛡️ Solución de Problemas de Instalación (A prueba de fallos)](#-solución-de-problemas-de-instalación-a-prueba-de-fallos)
+5. [El Panel de Control](#4-el-panel-de-control)
+6. [El Monólogo Interno de EIDOS](#5-el-monólogo-interno-de-eidos)
+7. [Cápsulas: cuando EIDOS se especializa](#6-cápsulas-cuando-eidos-se-especializa)
+8. [Casos de Uso Prácticos (El Recetario)](#7-casos-de-uso-prácticos-el-recetario)
+9. [El Enjambre MESH](#8-el-enjambre-mesh)
+10. [Configuración: API Keys y Cerebro Local](#9-configuración-api-keys-y-cerebro-local)
+11. [Resolución de Problemas](#10-resolución-de-problemas)
+12. [Preguntas Frecuentes](#11-preguntas-frecuentes)
 
 ---
 
@@ -135,6 +136,78 @@ Y pulsa Enter. Verás:
 4. A la derecha, verás las **5 capas de memoria** actualizarse en tiempo real.
 
 ¡Felicidades! Ya estás usando tu mente artificial.
+
+---
+
+## 🛡️ Solución de Problemas de Instalación (A prueba de fallos)
+
+EIDOS está diseñado para instalarse sin sobresaltos, pero durante el proceso pueden aparecer dos situaciones que **no son errores**, sino pasos normales. Aquí te explicamos qué hacer en cada caso.
+
+### La Ventana de Apple
+
+Durante la instalación, es posible que tu Mac te pida instalar las **"Herramientas de línea de comandos"**. Esto es completamente normal y seguro. Es un requisito de Apple para que EIDOS pueda usar la máxima potencia de tu chip.
+
+**Cómo se ve la ventana**: Se abre una pequeña ventana oficial de macOS con el título *"Instalar Command Line Tools (macOS...)"*, un icono de un martillo y un botón azul que dice **"Instalar"**. A continuación, te pedirá aceptar una licencia y comenzará la descarga (suele tardar entre 2 y 5 minutos dependiendo de tu conexión).
+
+**Qué debes hacer**:
+
+1. Haz clic en **"Instalar"**.
+2. Acepta los términos de la licencia.
+3. Espera a que la barra de progreso llegue al 100% y diga "Instalación completada".
+4. Vuelve a la ventana negra de Terminal (donde se está ejecutando el instalador de EIDOS) y **pulsa la tecla ENTER** para continuar.
+
+**¿Qué pasa si cancelas la ventana?**
+
+No pasa nada grave. El instalador de EIDOS detectará que las herramientas no se instalaron y continuará en **modo compatible (CPU)**. EIDOS se instalará igualmente y funcionará correctamente, solo que un poco más lento al pensar. Podrás instalar las herramientas de Apple más tarde (ejecutando de nuevo `install.command`) para activar la aceleración Metal.
+
+### El Modo Compatible (CPU)
+
+Si durante la instalación ves este mensaje en la terminal:
+
+```
+⚙️ Activando modo de compatibilidad (CPU).
+No te preocupes, EIDOS funcionará perfectamente y guardará toda tu memoria.
+Podrás intentar activar la aceleración Metal más tarde desde el Panel de Configuración de la App.
+```
+
+**¡Todo está bien!** EIDOS se ha instalado correctamente y funcionará de maravilla. Este mensaje solo significa que algo no permitió compilar la librería con aceleración gráfica (Metal), así que EIDOS usará el procesador (CPU) en su lugar.
+
+**Diferencias prácticas**:
+
+| Modo | Velocidad de pensamiento | Privacidad | Memoria | Funcionalidad |
+|------|--------------------------|------------|---------|---------------|
+| **Metal (GPU)** | 5-10x más rápido | 100% offline | ✓ Igual | ✓ Igual |
+| **CPU (Compatible)** | Más lento (pero funcional) | 100% offline | ✓ Igual | ✓ Igual |
+
+Como ves, **la única diferencia es la velocidad**. Tu memoria cognitiva, tus cápsulas, tu privacidad y todas las funciones de EIDOS son idénticas en ambos modos.
+
+**Cómo cambiar a Metal en el futuro**:
+
+1. Asegúrate de tener las Herramientas de línea de comandos instaladas (ejecuta `install.command` de nuevo; te dirá si ya están).
+2. Desde el Panel de Configuración de EIDOS (botón ⚙️ Settings en la esquina superior derecha), habrá una opción para recompilar con Metal. Si no la ves, puedes ejecutar `install.command` una vez más y responder "Sí" a la pregunta de Metal.
+
+### Verificación de SSD (que EIDOS se instale en el sitio correcto)
+
+Es importante confirmar que EIDOS se está instalando en **tu SSD externo** y no en el disco interno del Mac (donde no sería portable). Para verificarlo:
+
+1. **Abre Finder**.
+2. En la barra lateral izquierda, busca tu SSD bajo "Ubicaciones" o "Dispositivos". Debería aparecer con el nombre que le diste al formatearlo (por ejemplo, "EIDOS_SSD").
+3. Haz clic en él para ver su contenido.
+4. Durante la instalación, deberían aparecer dos carpetas nuevas en la raíz del SSD:
+
+   - **`.eidos_env`**: carpeta oculta (pulsa `Cmd + Shift + .` en Finder para mostrar archivos ocultos). Contiene Python, uv, y el entorno virtual. Suele ocupar entre 500 MB y 3 GB.
+   - **`data`**: carpeta visible. Contiene `eidos.db`, `monologues/`, `capsules/`, etc. Es **tu memoria cognitiva**. Al crecer, ocupará más espacio.
+
+5. **Comprobación rápida**: Si haces clic con el botón derecho sobre `.eidos_env` y eliges "Obtener información", el campo "Dónde" debe mostrar `/Volumes/TU_SSD/...` y **no** `/Users/tu_usuario/...`. Si ves `/Volumes/`, todo está correcto.
+
+**Si por error se instaló en el disco interno**:
+
+No pasa nada. Simplemente:
+1. Copia la carpeta de EIDOS (con `.eidos_env` y `data/`) a tu SSD externo.
+2. Ejecuta `install.command` desde el SSD. El instalador detectará que ya está instalado y solo ajustará las rutas.
+3. A partir de ahí, EIDOS vivirá en el SSD y será portable.
+
+**Regla de oro**: La carpeta `data/` es tu memoria. **Nunca la borres** salvo que quieras empezar de cero. Hacer backups de `data/` es hacer backup de tu mente artificial.
 
 ---
 
