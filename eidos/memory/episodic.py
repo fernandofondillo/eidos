@@ -10,6 +10,9 @@ Embeddings: en Fase 1.2 se usa un embedding **determinista** basado en
 bag-of-words normalizado + hash. Permite probar la capa vectorial sin
 GPU. En Fase 2 se sustituye por el embedding del Cortex Hub (Qwen2.5-3B
 o modelo sentence-transformers pequeño).
+
+Fase 2: el parámetro `embedder` permite inyectar cualquier backend que
+implemente el protocolo EmbedderBackend. Si es None, usa stub_embed.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from eidos.memory.base import MemoryLayer
 from eidos.utils.logging import get_logger
@@ -30,6 +33,19 @@ logger = get_logger(__name__)
 # Dimensión del embedding stub. Debe coincidir con la del vec0 virtual table.
 # En Fase 2, al usar embeddings reales, se puede recrear la tabla con otra dim.
 EMBEDDING_DIM = 256
+
+
+# ---------------------------------------------------------------------------
+# Protocolo Embedder (idéntico al de eidos.cortex.embeddings, replicado aquí
+# para evitar import circular en Fase 1.x cuando cortex no esté activo).
+# ---------------------------------------------------------------------------
+
+
+class _EmbedderLike(Protocol):
+    @property
+    def dim(self) -> int: ...
+
+    def embed(self, text: str) -> list[float]: ...
 
 
 # ---------------------------------------------------------------------------
@@ -90,10 +106,16 @@ class EpisodicMemory(MemoryLayer):
         db_path: Path,
         embedding_dim: int = EMBEDDING_DIM,
         max_events: int = 10000,
+        embedder: _EmbedderLike | None = None,
     ) -> None:
         self._db_path = db_path
         self._dim = embedding_dim
         self._max_events = max_events
+        # Fase 2: embedder inyectable. Si es None, usa stub_embed.
+        # Si se provee, su dim prevalece sobre embedding_dim.
+        self._embedder = embedder
+        if embedder is not None:
+            self._dim = embedder.dim
         self._vec_available = self._try_load_vec_extension()
 
     # ---------------- public API ----------------
@@ -108,14 +130,15 @@ class EpisodicMemory(MemoryLayer):
     ) -> int:
         """Almacena un evento episódico con su embedding.
 
-        Si `embedding` es None, se calcula con stub_embed.
+        Si `embedding` es None, se calcula con stub_embed o con el embedder
+        inyectado (Fase 2).
         """
         if not kind or not content:
             raise ValueError("kind and content are required")
         if not 0.0 <= importance <= 1.0:
             raise ValueError("importance must be in [0.0, 1.0]")
 
-        emb = embedding or stub_embed(content, self._dim)
+        emb = embedding or self._compute_embedding(content)
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         meta_json = json.dumps(metadata or {}, ensure_ascii=False)
 
@@ -144,7 +167,7 @@ class EpisodicMemory(MemoryLayer):
         """Búsqueda por similitud. Devuelve top_k eventos con score."""
         if top_k <= 0:
             return []
-        q_emb = stub_embed(query, self._dim)
+        q_emb = self._compute_embedding(query)
 
         # Camino A: sqlite-vec (rápido, native)
         if self._vec_available:
@@ -200,6 +223,12 @@ class EpisodicMemory(MemoryLayer):
         }
 
     # ---------------- internal: sqlite-vec ----------------
+
+    def _compute_embedding(self, text: str) -> list[float]:
+        """Usa el embedder inyectado (Fase 2) o stub_embed como fallback."""
+        if self._embedder is not None:
+            return self._embedder.embed(text)
+        return stub_embed(text, self._dim)
 
     def _try_load_vec_extension(self) -> bool:
         """Intenta cargar sqlite-vec. Si no está disponible, degradamos a bruteforce."""

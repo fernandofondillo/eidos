@@ -48,8 +48,20 @@ class MemoryStore:
         self.metacognitive = metacognitive
 
     @classmethod
-    def from_config(cls, config: dict[str, Any], project_root: Path) -> "MemoryStore":
-        """Construye el MemoryStore aplicando migraciones primero."""
+    def from_config(
+        cls,
+        config: dict[str, Any],
+        project_root: Path,
+        embedder: Any = None,
+    ) -> "MemoryStore":
+        """Construye el MemoryStore aplicando migraciones primero.
+
+        Args:
+            config: dict de config completo.
+            project_root: raíz del proyecto.
+            embedder: opcional, inyecta un EmbedderBackend (Fase 2) para la
+                capa episódica. Si es None, usa stub_embed.
+        """
         mem_cfg = config.get("memory", {})
         db_path = project_root / mem_cfg.get("episodic", {}).get("db_path", "data/eidos.db")
         migrations_dir = project_root / "data/migrations"
@@ -67,6 +79,7 @@ class MemoryStore:
             db_path=db_path,
             embedding_dim=int(mem_cfg.get("episodic", {}).get("embedding_dim", 256)),
             max_events=int(mem_cfg.get("episodic", {}).get("max_events", 10000)),
+            embedder=embedder,
         )
         semantic = SemanticMemory(
             graph_path=project_root / mem_cfg.get("semantic", {}).get("graph_path", "data/graph.json"),

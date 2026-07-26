@@ -24,15 +24,15 @@ EIDOS no es un chatbot. Es un **organismo digital** con:
 |------|-------------|--------|
 | 1.1   | Estructura + Core Engine + MonologueGenerator (stub) | ✅ |
 | 1.2   | 5 capas de memoria (SQLite + sqlite-vec + grafo JSON) | ✅ |
-| **1.3** | **Motivación intrínseca + consolidación background** | ✅ **Esta release** |
-| 2     | Cortex Hub — modelos GGUF/ONNX locales | ⏳ Próxima |
-| 3     | Génesis dinámica de cápsulas + Tool Sandbox | ⏳ |
+| 1.3   | Motivación intrínseca + consolidación background | ✅ |
+| **2** | **Cortex Hub — modelos GGUF locales + API fallback con PrivacyFilter** | ✅ **Esta release** |
+| 3     | Génesis dinámica de cápsulas + Tool Sandbox | ⏳ Próxima |
 | 4     | EIDOS MESH — enjambre y cooperación | ⏳ |
 | 5     | UI Tauri v2 + empaquetado cross-platform | ⏳ |
 
 ---
 
-## 🚀 Quickstart (Fase 1.3)
+## 🚀 Quickstart (Fase 2)
 
 ### Requisitos
 
@@ -57,7 +57,7 @@ uv sync --extra dev
 ### Uso
 
 ```bash
-# REPL interactivo — monólogo + memoria + reward signal + consolidador background
+# REPL interactivo — monólogo + memoria + reward signal + consolidador + CortexHub
 uv run eidos
 
 # Una sola consulta (sin arrancar consolidador)
@@ -75,12 +75,43 @@ uv run eidos consolidate
 # Historial de ejecuciones del consolidador
 uv run eidos runs
 
+# Gestión de modelos GGUF (Fase 2)
+uv run eidos models list
+uv run eidos models download <model_id>
+uv run eidos models delete <model_id>
+
+# Estado del CortexHub (Fase 2)
+uv run eidos cortex status
+uv run eidos cortex verify
+uv run eidos cortex privacy-test "Mi email es test@example.com"
+
 # Con config custom
 uv run eidos --config /path/to/eidos.yaml
 
 # Versión
 uv run eidos --version
 ```
+
+### Activar Cortex Hub (modelos locales)
+
+1. Compila `llama-cpp-python` con Metal (macOS Apple Silicon):
+   ```bash
+   CMAKE_ARGS="-DGGML_METAL=on" uv sync --extra cortex
+   ```
+
+2. Habilita el Cortex Hub en `config/eidos.yaml`:
+   ```yaml
+   cortex:
+     enabled: true
+     models_dir: "models"
+   core:
+     monologue_backend: "auto"  # usa llama_cpp si hay modelo, si no stub
+   ```
+
+3. Registra y descarga un modelo (programáticamente o vía config):
+   ```bash
+   uv run eidos models download qwen2.5-3b-instruct
+   ```
 
 ### Tests
 
@@ -194,6 +225,73 @@ Hilo daemon que ejecuta un loop cada `consolidation_interval_sec` (default 300s)
 5. **LRU episódica**: verifica overflow de `max_events`.
 
 Cada run se persiste en `consolidation_runs` con métricas por paso.
+
+---
+
+## 🧩 Cortex Hub — Sentidos Periféricos (Fase 2)
+
+El CortexHub es el gestor de los "sentidos" de EIDOS: modelos LLM locales para generar monólogos reales (no stub), embeddings reales para la capa episódica, y fallback a APIs externas con privacidad garantizada.
+
+### Arquitectura
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │              CortexHub                   │
+                    │  facade + lock singleton-virtual-ready  │
+                    └─────────────────────────────────────────┘
+                          │                │              │
+                          ▼                ▼              ▼
+                ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+                │ ModelManager │  │ LlamaBackend │  │ APIFallback  │
+                │ (download,  │  │ (GBNF grammar│  │ (PrivacyFilter│
+                │  verify)    │  │  JSON forzado│  │  + OpenAI API)│
+                └──────────────┘  └──────────────┘  └──────────────┘
+                                       │
+                                       ▼
+                                ┌──────────────┐
+                                │  Embedder    │
+                                │  (real or    │
+                                │   stub)      │
+                                └──────────────┘
+```
+
+### Componentes
+
+| Componente | Función |
+|-----------|---------|
+| **ModelManager** | Descarga HTTP con resume, verificación SHA256, registro en SQLite |
+| **LlamaCppBackend** | Backend de monólogo con `llama-cpp-python` + GBNF grammar estricto |
+| **LlamaCppEmbedder** | Embeddings reales (reemplaza `stub_embed` en EpisodicMemory) |
+| **APIFallbackBackend** | Fallback a APIs OpenAI-compatibles, con PrivacyFilter SIEMPRE aplicado |
+| **PrivacyFilter** | Redacción regex de PII (email, tel, IP, DNI, tarjeta, IBAN, URL con creds) |
+| **CortexHub** | Facade + lock file (singleton-virtual-ready para Fase 4 MESH) |
+
+### Backend 'auto' (degradación graceful)
+
+```python
+EidosCore(monologue_backend="auto", cortex_hub=hub)
+# 1. Intenta LlamaCppBackend si hay modelo READY
+# 2. Si no hay modelo o falla → degrada a StubBackend
+# 3. Logs claros en cada paso
+```
+
+### PrivacyFilter — privacidad por diseño
+
+Cuando se habilita `api_fallback`, **SIEMPRE** se aplica PrivacyFilter al input antes de enviarlo a la API externa. Patrones soportados:
+
+- Email, Teléfono (ES + internacional), IPv4, DNI español
+- Tarjeta de crédito, IBAN español, URL con credenciales
+
+```bash
+$ uv run eidos cortex privacy-test "Email: juan@test.com, IP: 10.0.0.1"
+Original:  Email: juan@test.com, IP: 10.0.0.1
+Filtrado:  Email: [REDACTED_EMAIL_1], IP: [REDACTED_IPV4_1]
+Redactions: 2
+```
+
+### Lock singleton-virtual-ready (prepara Fase 4)
+
+`CortexHub.try_acquire_lock(role, ttl)` usa `fcntl.flock` local en Fase 2. En Fase 4 se sustituirá por `resource_token` MESH distribuido sin cambiar la API. Solo un proceso EIDOS puede tener el lock activo — evita que dos instancias carguen el modelo en VRAM a la vez.
 
 ---
 

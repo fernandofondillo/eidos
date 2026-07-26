@@ -94,7 +94,7 @@ Multi-instancia cooperativa en un mismo dispositivo:
 - ✅ **Fase 1.1**: Core Engine + MonologueGenerator (stub). Tests verdes.
 - ✅ **Fase 1.2**: 5 capas de memoria (SQLite + sqlite-vec + networkx + .eidos). 74 tests.
 - ✅ **Fase 1.3**: Motivación intrínseca (3 drivers) + consolidador background. 108 tests.
-- ⏳ Fase 2: Cortex Hub (Qwen2.5-3B local, llama-cpp-python).
+- ✅ **Fase 2**: Cortex Hub (ModelManager + LlamaCppBackend + Embeddings + APIFallback + PrivacyFilter). 158 tests.
 - ⏳ Fase 3: Génesis de cápsulas + Tool Sandbox.
 - ⏳ Fase 4: EIDOS MESH (sockets UNIX + leader election + arbitraje).
 - ⏳ Fase 5: UI Tauri v2 + empaquetado cross-platform.
@@ -177,3 +177,44 @@ Para cada monologue en `monologue_index` con `outcome IS NULL`, el consolidador:
 3. Etiqueta: `positive` (sum > +0.2) / `negative` (sum < -0.2) / `neutral` (resto).
 
 Esto permite a la capa metacognitiva responder preguntas como *"¿qué tipo de rutas (route_type) tienden a generar outcomes negativos?"* — base del aprendizaje por refuerzo en futuras fases.
+
+## 8. Cortex Hub (Fase 2) — detalle de implementación
+
+### Backends del MonologueGenerator
+
+| Backend | Cuándo se usa | Requiere |
+|---------|---------------|----------|
+| `stub` | Desarrollo sin GPU, tests | Nada |
+| `llama_cpp` | Modelo GGUF local cargado | `llama-cpp-python` + modelo en `/models` |
+| `api` | Fallback externo (opt-in) | API key en env var |
+| `auto` | Selección automática | CortexHub + degradación graceful a stub |
+
+`MonologueGenerator` ahora acepta `backend_instance` para inyectar un backend ya construido (útil cuando CortexHub ha cargado el modelo).
+
+### LlamaCppBackend — JSON forzado con GBNF
+
+El backend usa `LlamaGrammar.from_string(_MONOLOGUE_GBNF)` para forzar al modelo a producir JSON válido según el schema del Monologue. Si el modelo genera JSON inválido:
+1. Se reintenta (máx 3 intentos, bajando `temperature` en cada reintento).
+2. Tras N reintentos, lanza `RuntimeError` (EidosCore captura y degrada a stub en modo `auto`).
+
+### PrivacyFilter
+
+8 patrones regex en orden específico (URL_CREDENTIALS → IBAN → CREDIT_CARD → EMAIL → DNI_ES → IPV4 → PHONE_INTL → PHONE_ES). Cada match se reemplaza por `[REDACTED_<TYPE>_<N>]`. Patrones custom inyectables para dominios específicos.
+
+### CortexHub — lock singleton-virtual-ready
+
+```python
+hub.try_acquire_lock(role="primary", ttl_sec=60.0)  # fcntl.flock local en Fase 2
+# En Fase 4: resource_token MESH distribuido, MISMA API
+```
+
+El lock se adquiere antes de cargar cualquier modelo en VRAM. TTL evita deadlocks si el proceso muere sin liberar. En Fase 4 se sustituirá la implementación sin cambiar la API pública.
+
+### EpisodicMemory con embedder inyectable
+
+```python
+em = EpisodicMemory(db_path, embedder=hub.get_embedder())  # real
+em = EpisodicMemory(db_path)                                # stub (default)
+```
+
+Cuando CortexHub tiene un modelo de embeddings READY, EpisodicMemory usa embeddings reales (dim 384 típica para BGE-small). Si no, degrada a `stub_embed` (dim 256). La tabla `vec0` se crea con la dim del embedder al primer arranque.

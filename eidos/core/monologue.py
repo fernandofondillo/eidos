@@ -288,6 +288,9 @@ class MonologueGenerator:
         gen = MonologueGenerator(backend="stub")
         m = gen.generate("¿Qué es EIDOS?")
         print(m.plan)
+
+    Fase 2: se puede inyectar una instancia ya construida del backend
+    vía `backend_instance` (útil cuando CortexHub ya ha cargado el modelo).
     """
 
     def __init__(
@@ -296,11 +299,15 @@ class MonologueGenerator:
         *,
         monologues_dir: Path | None = None,
         max_plan_steps: int = 5,
+        backend_instance: MonologueBackend | None = None,
     ) -> None:
         self._backend_name = backend
         self._max_plan_steps = max_plan_steps
         self._monologues_dir = monologues_dir
-        self._backend: MonologueBackend = self._select_backend(backend)
+        if backend_instance is not None:
+            self._backend = backend_instance
+        else:
+            self._backend = self._select_backend(backend)
 
     @staticmethod
     def _select_backend(name: str) -> MonologueBackend:

@@ -1,14 +1,16 @@
-"""EidosCore — orquestador principal del núcleo cognitivo. Fase 1.3.
+"""EidosCore — orquestador principal del núcleo cognitivo. Fase 2.
 
 Pipeline completo:
     user_input
       → MotivationModule.observe_user_input()     # reward de satisfacción
       → SensoryMemory.store(user_input)
       → MonologueGenerator → Monologue
+          (Fase 2: backend puede ser stub | llama_cpp | api vía CortexHub)
       → MotivationModule.observe_confidence()     # reward de curiosidad
       → MetacognitiveMemory.store(monologue, route)
       → ActionRouter → Route
       → EpisodicMemory.search() si route == SEARCH_MEMORY
+          (Fase 2: usa embeddings reales del CortexHub si available)
       → (NLG/acción) → Response
       → SensoryMemory.store(response)
       → EpisodicMemory.store(interaction)
@@ -48,6 +50,8 @@ class Response(BaseModel):
     memory_context: list[dict[str, Any]] | None = None
     # Fase 1.3: reward signal del turno actual
     reward_delta: float = 0.0
+    # Fase 2: backend usado para generar el monólogo
+    monologue_backend: str = "stub"
 
 
 class EidosCore:
@@ -63,17 +67,35 @@ class EidosCore:
         motivation: MotivationModule | None = None,
         consolidator: Consolidator | None = None,
         auto_start_consolidator: bool = True,
+        cortex_hub: Any = None,
+        cortex_monologue_client: Any = None,
     ) -> None:
-        self._generator = MonologueGenerator(
-            backend=monologue_backend,
-            monologues_dir=monologues_dir,
-            max_plan_steps=max_plan_steps,
-        )
-        self._router = ActionRouter(confidence_threshold=confidence_threshold)
+        """
+        Args:
+            monologue_backend: 'stub' | 'llama_cpp' | 'api' | 'auto'.
+                'auto' (Fase 2): intenta CortexHub; si no hay modelo,
+                degrada a stub.
+            cortex_hub: instancia de CortexHub (Fase 2). Si es None y
+                backend='auto', se usa stub.
+            cortex_monologue_client: opcional, inyecta un LlamaClient en
+                el backend del CortexHub (tests).
+        """
         self._monologues_dir = monologues_dir
         self._memory = memory
         self._motivation = motivation
         self._consolidator = consolidator
+        self._cortex_hub = cortex_hub
+        self._cortex_client = cortex_monologue_client
+        self._max_plan_steps = max_plan_steps
+
+        # Resolver backend real
+        effective_backend, generator = self._resolve_backend(
+            monologue_backend, monologues_dir, max_plan_steps
+        )
+        self._generator = generator
+        self._effective_backend = effective_backend
+
+        self._router = ActionRouter(confidence_threshold=confidence_threshold)
 
         # Arrancar consolidador background si está configurado
         if self._consolidator is not None and auto_start_consolidator:
@@ -81,13 +103,62 @@ class EidosCore:
 
         logger.info(
             "eidos_core_init",
-            backend=monologue_backend,
+            backend=effective_backend,
             threshold=confidence_threshold,
             persist=bool(monologues_dir),
             memory=bool(memory),
             motivation=bool(motivation),
             consolidator=bool(consolidator),
+            cortex=bool(cortex_hub),
         )
+
+    def _resolve_backend(
+        self,
+        requested: str,
+        monologues_dir: Path | None,
+        max_plan_steps: int,
+    ) -> tuple[str, MonologueGenerator]:
+        """Resuelve qué backend usar de forma robusta.
+
+        - 'stub' → siempre stub.
+        - 'llama_cpp' | 'api' → usa ese directo (debe estar instalado).
+        - 'auto' → intenta CortexHub (llama_cpp si hay modelo), fallback a stub.
+        """
+        if requested == "auto":
+            if self._cortex_hub is not None:
+                try:
+                    # Pedir lock antes de instanciar backend
+                    if self._cortex_hub.try_acquire_lock(role="primary", ttl_sec=60.0):
+                        backend = self._cortex_hub.get_monologue_backend(
+                            max_plan_steps=max_plan_steps,
+                            client=self._cortex_client,
+                        )
+                        if backend is not None:
+                            self._cortex_backend = backend
+                            gen = MonologueGenerator(
+                                backend="llama_cpp",
+                                monologues_dir=monologues_dir,
+                                max_plan_steps=max_plan_steps,
+                                backend_instance=backend,
+                            )
+                            return "llama_cpp", gen
+                except Exception as e:
+                    logger.warning("cortex_backend_resolution_failed", error=str(e))
+            # Degradación a stub
+            logger.info("cortex_auto_degraded_to_stub")
+            return "stub", MonologueGenerator(
+                backend="stub",
+                monologues_dir=monologues_dir,
+                max_plan_steps=max_plan_steps,
+            )
+
+        # Backend explícito
+        gen = MonologueGenerator(
+            backend=requested,
+            monologues_dir=monologues_dir,
+            max_plan_steps=max_plan_steps,
+        )
+        return requested, gen
 
     def think_and_respond(self, user_input: str, context: str | None = None) -> Response:
         """Pipeline completo: input → memoria → monólogo → ruta → respuesta."""
@@ -181,13 +252,20 @@ class EidosCore:
             confidence=monologue.confidence,
             memory_context=memory_context,
             reward_delta=round(reward_delta, 4),
+            monologue_backend=monologue.backend,
         )
 
     def shutdown(self) -> None:
-        """Detiene el consolidador background limpiamente."""
+        """Detiene el consolidador background y libera el CortexHub."""
         if self._consolidator is not None:
             self._consolidator.stop()
             logger.info("eidos_core_shutdown_consolidator_stopped")
+        if self._cortex_hub is not None:
+            try:
+                self._cortex_hub.close()
+                logger.info("eidos_core_shutdown_cortex_closed")
+            except Exception as e:
+                logger.warning("eidos_core_shutdown_cortex_failed", error=str(e))
 
     @staticmethod
     def _render_response(
