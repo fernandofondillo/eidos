@@ -1,11 +1,12 @@
-"""EidosCore — orquestador principal del núcleo cognitivo. Fase 3.
+"""EidosCore — orquestador principal del núcleo cognitivo. Fase 4.
 
 Pipeline completo:
     user_input
       → MotivationModule.observe_user_input()     # reward de satisfacción
       → SensoryMemory.store(user_input)
       → MonologueGenerator → Monologue
-          (Fase 2: backend puede ser stub | llama_cpp | api vía CortexHub)
+          (Fase 2: stub | llama_cpp | api | auto vía CortexHub)
+          (Fase 4: si soy Worker, el LLM se ejecuta en el Leader vía MESH)
       → MotivationModule.observe_confidence()     # reward de curiosidad
       → MetacognitiveMemory.store(monologue, route)
       → ActionRouter → Route
@@ -16,12 +17,8 @@ Pipeline completo:
       → EvolutionLoop.process_turn()  # Fase 3: detecta necesidad de cápsulas
 
 Background:
-    Consolidator (hilo daemon) cada 5 min:
-      - compacta sensory → episódica
-      - indexa monólogos huérfanos
-      - infiere outcomes pendientes
-      - expira cápsulas por TTL
-      - Fase 3: promueve cápsulas populares a favoritas (EvolutionLoop.check_promotions)
+    Consolidator (hilo daemon) cada 5 min
+    Fase 4: MeshCoordinator (si mesh.enabled) — enjambre con leader election
 """
 
 from __future__ import annotations
@@ -74,6 +71,7 @@ class EidosCore:
         cortex_hub: Any = None,
         cortex_monologue_client: Any = None,
         evolution_loop: EvolutionLoop | None = None,
+        mesh_coordinator: Any = None,
     ) -> None:
         """
         Args:
@@ -86,6 +84,8 @@ class EidosCore:
                 el backend del CortexHub (tests).
             evolution_loop: instancia de EvolutionLoop (Fase 3). Si es None,
                 no se detectan necesidades de cápsulas automáticamente.
+            mesh_coordinator: instancia de MeshCoordinator (Fase 4). Si es
+                None, el nodo opera standalone (sin enjambre).
         """
         self._monologues_dir = monologues_dir
         self._memory = memory
@@ -94,6 +94,7 @@ class EidosCore:
         self._cortex_hub = cortex_hub
         self._cortex_client = cortex_monologue_client
         self._evolution_loop = evolution_loop
+        self._mesh_coordinator = mesh_coordinator
         self._max_plan_steps = max_plan_steps
 
         # Resolver backend real
@@ -119,6 +120,7 @@ class EidosCore:
             consolidator=bool(consolidator),
             cortex=bool(cortex_hub),
             evolution=bool(evolution_loop),
+            mesh=bool(mesh_coordinator),
         )
 
     def _resolve_backend(
@@ -279,8 +281,13 @@ class EidosCore:
             evolution_event=evolution_event,
         )
 
+    @property
+    def mesh(self) -> Any:
+        """Acceso al MeshCoordinator (None si no está activo)."""
+        return self._mesh_coordinator
+
     def shutdown(self) -> None:
-        """Detiene el consolidador background y libera el CortexHub."""
+        """Detiene consolidador, libera CortexHub y detiene MeshCoordinator."""
         if self._consolidator is not None:
             self._consolidator.stop()
             logger.info("eidos_core_shutdown_consolidator_stopped")
@@ -290,6 +297,12 @@ class EidosCore:
                 logger.info("eidos_core_shutdown_cortex_closed")
             except Exception as e:
                 logger.warning("eidos_core_shutdown_cortex_failed", error=str(e))
+        if self._mesh_coordinator is not None:
+            try:
+                self._mesh_coordinator.stop()
+                logger.info("eidos_core_shutdown_mesh_stopped")
+            except Exception as e:
+                logger.warning("eidos_core_shutdown_mesh_failed", error=str(e))
 
     @staticmethod
     def _render_response(

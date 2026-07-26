@@ -76,12 +76,13 @@ cortex:
   fallback_to_api: true
 
 # -----------------------------------------------------------------------------
-# EIDOS MESH — placeholder (se activa en Fase 4)
+# EIDOS MESH — enjambre y cooperación (Fase 4)
 # -----------------------------------------------------------------------------
 mesh:
-  enabled: false
+  enabled: true
   transport: "unix_socket"       # v1: sockets; upgrade path: "redis_embedded"
-  socket_path: "/tmp/eidos.mesh.sock"
+  runtime_dir: "data/runtime"    # sockets por nodo: eidos-<node_id>.sock
+  lockfile_path: "/tmp/eidos.mesh.leader"  # lockfile atómico para leader election
   heartbeat_sec: 2
   leader_timeout_sec: 6
   resource_token_ttl_sec: 30

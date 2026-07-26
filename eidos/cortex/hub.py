@@ -1,4 +1,4 @@
-"""CortexHub — Fase 2.
+"""CortexHub — Fase 2 + Fase 4.
 
 Facade unificada para los "sentidos periféricos" de EIDOS:
 - ModelManager (catálogo de modelos)
@@ -6,17 +6,11 @@ Facade unificada para los "sentidos periféricos" de EIDOS:
 - LlamaCppEmbedder (embeddings reales)
 - APIFallbackBackend (fallback externo con privacy filter)
 
-Singleton-virtual-ready:
+Singleton-virtual-ready (Fase 4):
 - try_acquire_lock(role, ttl_sec) → bool
-  En Fase 2: file lock local (fcntl sobre /tmp/eidos.cortex.lock).
-  En Fase 4: se sustituirá por resource_token MESH distribuido.
-- Solo un proceso EIDOS puede tener el lock activo a la vez.
-
-El CortexHub decide qué backend usar según config y disponibilidad:
-1. Si cortex.enabled=false → devuelve None (núcleo usa stub).
-2. Si modelo local está READY → LlamaCppBackend.
-3. Si api_fallback.enabled=true → APIFallbackBackend (con privacy filter).
-4. Si ninguno → None (degradación graceful a stub).
+  - Si mesh_coordinator es None: file lock local (fcntl, Fase 2).
+  - Si mesh_coordinator está configurado: pide resource_token MESH distribuido.
+- La API pública es la misma; solo cambia la implementación interna.
 """
 
 from __future__ import annotations
@@ -37,18 +31,19 @@ logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Lock local para singleton virtual (Fase 2)
+# Lock handle (Fase 2: file lock; Fase 4: MESH resource token)
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class CortexLock:
-    """Handle del lock del CortexHub. Liberarlo libera el file lock."""
+    """Handle del lock del CortexHub."""
 
     role: str
     acquired_at: float
     ttl_sec: float
-    _fd: Any = None  # file descriptor del lock
+    _fd: Any = None  # file descriptor del lock (Fase 2)
+    _mesh_token_id: str | None = None  # MESH resource token (Fase 4)
 
     def is_expired(self) -> bool:
         return time.time() > self.acquired_at + self.ttl_sec
@@ -76,10 +71,16 @@ class CortexHub:
         model_manager: ModelManager,
         lock_path: Path | None = None,
         privacy_filter: PrivacyFilter | None = None,
+        mesh_coordinator: Any = None,
     ) -> None:
+        """Args:
+            mesh_coordinator: si es None, usa fcntl local (Fase 2).
+                Si está configurado, usa resource_token MESH distribuido (Fase 4).
+        """
         self._mm = model_manager
         self._lock_path = lock_path or Path("/tmp/eidos.cortex.lock")
         self._privacy = privacy_filter or PrivacyFilter()
+        self._mesh = mesh_coordinator
         self._current_lock: CortexLock | None = None
         # Caches para no recargar modelos en cada call
         self._monologue_backend: LlamaCppBackend | Any = None
@@ -90,12 +91,8 @@ class CortexHub:
     def try_acquire_lock(self, role: str = "primary", ttl_sec: float = 30.0) -> bool:
         """Intenta adquirir el lock del CortexHub.
 
-        En Fase 2: file lock local exclusivo (fcntl.LOCK_EX | LOCK_NB).
-        En Fase 4: se sustituirá por resource_token MESH distribuido.
-
-        Returns:
-            True si se adquirió (o ya estaba activo y no expirado).
-            False si otro proceso lo tiene.
+        Fase 2 (mesh_coordinator=None): file lock local exclusivo.
+        Fase 4 (mesh_coordinator set): resource_token MESH distribuido.
         """
         # ¿Ya tenemos lock activo y vigente?
         if self._current_lock is not None and not self._current_lock.is_expired():
@@ -103,13 +100,21 @@ class CortexHub:
 
         # ¿Lock activo pero expirado? Liberar primero
         if self._current_lock is not None:
-            self._current_lock.release()
+            self._release_current_lock()
             self._current_lock = None
 
+        # Fase 4: pedir token MESH
+        if self._mesh is not None:
+            return self._acquire_mesh_lock(role, ttl_sec)
+
+        # Fase 2: fcntl local
+        return self._acquire_local_lock(role, ttl_sec)
+
+    def _acquire_local_lock(self, role: str, ttl_sec: float) -> bool:
+        """Fase 2: fcntl.flock local exclusivo."""
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             fd = open(self._lock_path, "w")
-            # LOCK_NB = non-blocking; si está tomado, lanza BlockingIOError
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fd.write(f"{role}\n")
             fd.flush()
@@ -118,10 +123,8 @@ class CortexHub:
             logger.warning("cortex_lock_busy", path=str(self._lock_path))
             return False
         except OSError as e:
-            # En algunos sistemas /tmp puede no soportar flock; degradamos a lock en memoria
             logger.warning("cortex_lock_unavailable_degraded", error=str(e))
             fd.close()
-            # Degradación: lock en memoria (no cross-process, pero permite tests)
             self._current_lock = CortexLock(
                 role=role, acquired_at=time.time(), ttl_sec=ttl_sec
             )
@@ -133,14 +136,55 @@ class CortexHub:
             ttl_sec=ttl_sec,
             _fd=fd,
         )
-        logger.info("cortex_lock_acquired", role=role, ttl=ttl_sec)
+        logger.info("cortex_lock_acquired_local", role=role, ttl=ttl_sec)
         return True
 
-    def release_lock(self) -> None:
-        if self._current_lock is not None:
+    def _acquire_mesh_lock(self, role: str, ttl_sec: float) -> bool:
+        """Fase 4: pide resource_token 'cortex' al arbitrator MESH."""
+        try:
+            token = self._mesh.acquire_resource(
+                resource="cortex",
+                ttl_sec=ttl_sec,
+                metadata={"role": role},
+            )
+            if token is None:
+                logger.warning("cortex_lock_mesh_denied", resource="cortex")
+                return False
+            self._current_lock = CortexLock(
+                role=role,
+                acquired_at=time.time(),
+                ttl_sec=ttl_sec,
+                _mesh_token_id=token.token_id,
+            )
+            logger.info(
+                "cortex_lock_acquired_mesh",
+                role=role,
+                ttl=ttl_sec,
+                token_id=token.token_id,
+            )
+            return True
+        except Exception as e:
+            logger.error("cortex_lock_mesh_failed", error=str(e))
+            return False
+
+    def _release_current_lock(self) -> None:
+        """Libera el lock actual (local o MESH)."""
+        if self._current_lock is None:
+            return
+        # Si hay mesh_token_id, liberar vía MESH
+        if self._current_lock._mesh_token_id is not None and self._mesh is not None:
+            try:
+                self._mesh.release_resource(self._current_lock._mesh_token_id)
+            except Exception as e:
+                logger.warning("cortex_lock_mesh_release_failed", error=str(e))
+        # Si hay fd (Fase 2), liberar file lock
+        if self._current_lock._fd is not None:
             self._current_lock.release()
-            self._current_lock = None
-            logger.info("cortex_lock_released")
+        self._current_lock = None
+        logger.info("cortex_lock_released")
+
+    def release_lock(self) -> None:
+        self._release_current_lock()
 
     def has_lock(self) -> bool:
         return self._current_lock is not None and not self._current_lock.is_expired()
@@ -154,13 +198,8 @@ class CortexHub:
         client: LlamaClient | None = None,
     ) -> Any:
         """Devuelve un MonologueBackend listo para usar, o None si no hay
-        ningún modelo disponible.
-
-        En Fase 2: devuelve LlamaCppBackend con el modelo `model_id`.
-        Si `client` se pasa (tests), lo inyecta.
-        """
+        ningún modelo disponible."""
         if model_id is None:
-            # Buscar el primer modelo de propósito 'monologue' que esté READY
             candidates = self._mm.list_by_purpose("monologue")
             ready = [m for m in candidates if m.status == ModelStatus.READY.value]
             if not ready:
@@ -168,7 +207,6 @@ class CortexHub:
                 return None
             model_id = ready[0].id
 
-        # Cache: si ya tenemos backend para el mismo model_id, reusar
         if self._monologue_backend is not None and getattr(self._monologue_backend, "_model_id", None) == model_id:
             return self._monologue_backend
 
@@ -187,7 +225,6 @@ class CortexHub:
             max_plan_steps=max_plan_steps,
             client=client,
         )
-        # Tag para cache
         backend._model_id = model_id  # type: ignore[attr-defined]
         self._monologue_backend = backend
         return backend
@@ -261,6 +298,7 @@ class CortexHub:
             "module": "cortex_hub",
             "lock_path": str(self._lock_path),
             "has_lock": self.has_lock(),
+            "mesh_enabled": self._mesh is not None,
             "monologue_backend_active": self._monologue_backend is not None,
             "embedder_active": self._embedder is not None,
             "models": self._mm.stats(),

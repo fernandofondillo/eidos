@@ -26,13 +26,13 @@ EIDOS no es un chatbot. Es un **organismo digital** con:
 | 1.2   | 5 capas de memoria (SQLite + sqlite-vec + grafo JSON) | ✅ |
 | 1.3   | Motivación intrínseca + consolidación background | ✅ |
 | 2     | Cortex Hub — modelos GGUF locales + API fallback con PrivacyFilter | ✅ |
-| **3** | **Génesis dinámica de cápsulas + Tool Sandbox + EvolutionLoop** | ✅ **Esta release** |
-| 4     | EIDOS MESH — enjambre y cooperación | ⏳ Próxima |
-| 5     | UI Tauri v2 + empaquetado cross-platform | ⏳ |
+| 3     | Génesis dinámica de cápsulas + Tool Sandbox + EvolutionLoop | ✅ |
+| **4** | **EIDOS MESH — enjambre, leader election + arbitraje de recursos** | ✅ **Esta release** |
+| 5     | UI Tauri v2 + empaquetado cross-platform | ⏳ Próxima |
 
 ---
 
-## 🚀 Quickstart (Fase 3)
+## 🚀 Quickstart (Fase 4)
 
 ### Requisitos
 
@@ -93,6 +93,9 @@ uv run eidos capsules sandbox-test "import math; print(math.sqrt(16))" --entry n
 uv run eidos cortex status
 uv run eidos cortex verify
 uv run eidos cortex privacy-test "Mi email es test@example.com"
+
+# Estado del enjambre MESH (Fase 4)
+uv run eidos mesh status
 
 # Con config custom
 uv run eidos --config /path/to/eidos.yaml
@@ -398,6 +401,115 @@ Las favoritas nunca expiran por TTL (caducidad).
   }
 }
 ```
+
+---
+
+## 🌐 EIDOS MESH — Enjambre y Cooperación (Fase 4)
+
+La **joya de la corona**. EIDOS puede correr en múltiples instancias en el mismo dispositivo, cooperando como un enjambre auto-organizado.
+
+### Arquitectura
+
+```
+   ┌─────────────────┐                    ┌─────────────────┐
+   │   EIDOS Leader  │ ◄── heartbeat ───  │  EIDOS Worker   │
+   │                 │ ── leader_announce ─►                 │
+   │  • CortexHub ON │                    │  • CortexHub OFF│
+   │  • Arbitrator   │ ◄── acquire_token ─ │  • pide tokens │
+   │  • Registry     │ ── token granted ─► │                │
+   │  • Heartbeat    │                    │  • Watcher      │
+   └─────────────────┘                    └─────────────────┘
+            │                                       │
+            └───────── shared SQLite WAL ───────────┘
+```
+
+### Roles
+
+| Rol | Responsabilidad |
+|-----|-----------------|
+| **LEADER** | Posee el CortexHub activo, arbitra recursos, coordina tareas |
+| **WORKER** | Delega inferencia LLM al Leader vía bus, pide `resource_tokens` |
+| **CANDIDATE** | Transitorio durante re-elección |
+
+### Leader Election (anti split-brain)
+
+2 mecanismos combinados:
+
+1. **Lockfile atómico** (`O_CREAT|O_EXCL` sobre `/tmp/eidos.mesh.leader`): gana quien lo adquiere. Contiene PID + hostname + node_id para diagnóstico.
+2. **Heartbeat** cada 2s vía bus pub/sub: si el Leader no heartbeat en 6s → re-elección.
+
+```python
+# Solo un proceso puede ser Leader a la vez (atomic lockfile)
+election = LeaderElection(node_id, lockfile_path, bus)
+role = election.try_acquire_leadership()
+# → LEADER (si ganó) o WORKER (si perdió)
+```
+
+### Arbitraje de Recursos
+
+Solo el Leader posee el CortexHub activo. Los Workers piden `resource_token` vía RPC:
+
+```python
+# Worker pide recurso al Leader
+token = mesh.acquire_resource('cortex', ttl_sec=30)
+if token:
+    try:
+        # usar el LLM (que está en el Leader, vía RPC)
+        ...
+    finally:
+        mesh.release_resource(token.token_id)
+```
+
+**Recursos arbitrables**:
+- `cortex` — acceso exclusivo al LLM local (evita OOM por doble carga en VRAM)
+- `memory_write` — escritura a la DB consolidada (single-writer)
+- `sandbox` — uso del ToolSandbox (limita paralelismo)
+
+TTL anti-deadlock: si el Worker muere sin liberar, el token expira a los 30s.
+
+### Refactor del CortexHub (misma API, nueva implementación)
+
+El `CortexHub.try_acquire_lock()` que era `fcntl.flock` local en Fase 2 ahora usa `resource_token` MESH cuando `mesh.enabled=true`:
+
+```python
+# Fase 2 (sin mesh): fcntl local
+hub = CortexHub(model_manager=mm)
+
+# Fase 4 (con mesh): resource_token distribuido
+hub = CortexHub(model_manager=mm, mesh_coordinator=coord)
+# MISMA API: hub.try_acquire_lock(role, ttl) → bool
+```
+
+### Activar el MESH
+
+```yaml
+# config/eidos.yaml
+mesh:
+  enabled: true
+  transport: "unix_socket"
+  runtime_dir: "data/runtime"
+  lockfile_path: "/tmp/eidos.mesh.leader"
+  heartbeat_sec: 2
+  leader_timeout_sec: 6
+  resource_token_ttl_sec: 30
+```
+
+```bash
+# Lanzar 3 instancias en paralelo (terminales distintas):
+uv run eidos                    # Terminal 1 → se vuelve LEADER
+uv run eidos                    # Terminal 2 → WORKER
+uv run eidos                    # Terminal 3 → WORKER
+
+# Ver estado del enjambre:
+uv run eidos mesh status
+```
+
+### Comunicación
+
+- **Transporte**: Sockets UNIX (POSIX) con newline-delimited JSON.
+- **Protocolo**: JSON-RPC 2.0 adaptado (Mensajes tipados: PUB, REQUEST, RESPONSE, ERROR).
+- **Topics pub/sub**: `heartbeat`, `memory_update`, `node_joined`, `node_left`, `leader_announce`.
+- **RPC methods**: `hello`, `goodbye`, `acquire_token`, `release_token`, `list_nodes`, `delegate_inference`, `who_is_leader`.
 
 ---
 

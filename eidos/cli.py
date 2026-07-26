@@ -67,6 +67,7 @@ def build_core(config: dict, project_root: Path, start_consolidator: bool = True
     core_cfg = config.get("core", {})
     cortex_cfg = config.get("cortex", {})
     evolution_cfg = config.get("evolution", {})
+    mesh_cfg = config.get("mesh", {})
     persist = core_cfg.get("persist_monologues", False)
     monologues_dir = (project_root / core_cfg.get("monologues_dir", "data/monologues")) if persist else None
     if monologues_dir is not None:
@@ -89,22 +90,30 @@ def build_core(config: dict, project_root: Path, start_consolidator: bool = True
         interval_sec=int(metacog_cfg.get("consolidation_interval_sec", 300)),
     )
 
-    # Fase 2: CortexHub (si está habilitado)
+    # Fase 4: MeshCoordinator (si está habilitado)
+    from eidos.mesh.coordinator import MeshCoordinator
+
+    mesh_coordinator = MeshCoordinator.from_config(
+        config, db_path=db_path, project_root=project_root
+    )
+    if mesh_coordinator is not None:
+        mesh_coordinator.start()
+
+    # Fase 2: CortexHub (si está habilitado, con mesh_coordinator inyectado)
     cortex_hub = None
     if cortex_cfg.get("enabled", False):
         models_dir = project_root / cortex_cfg.get("models_dir", "models")
         mm = ModelManager(db_path=db_path, models_dir=models_dir)
-        cortex_hub = CortexHub(model_manager=mm)
+        cortex_hub = CortexHub(model_manager=mm, mesh_coordinator=mesh_coordinator)
 
     # Resolver backend según config
     backend_requested = core_cfg.get("monologue_backend", "stub")
     if cortex_hub is not None and backend_requested == "stub":
-        # Si hay CortexHub, usar 'auto' (degradará a stub si no hay modelos)
         backend_requested = "auto"
 
     # Fase 3: CapsuleForge + EvolutionLoop
     evolution_loop = None
-    if evolution_cfg.get("enabled", True):  # activo por defecto
+    if evolution_cfg.get("enabled", True):
         from eidos.core.forge import CapsuleForge, StubForgeBackend
         from eidos.core.evolution import EvolutionLoop
         from eidos.core.sandbox import ToolSandbox
@@ -113,7 +122,6 @@ def build_core(config: dict, project_root: Path, start_consolidator: bool = True
             timeout_sec=float(evolution_cfg.get("sandbox_timeout_sec", 5)),
             mem_limit_mb=int(evolution_cfg.get("sandbox_mem_mb", 256)),
         )
-        # Backend del forge: stub por defecto; LLM si hay cortex_hub
         forge_backend = StubForgeBackend()
         if cortex_hub is not None:
             from eidos.core.forge import LLMForgeBackend
@@ -142,6 +150,7 @@ def build_core(config: dict, project_root: Path, start_consolidator: bool = True
         auto_start_consolidator=start_consolidator,
         cortex_hub=cortex_hub,
         evolution_loop=evolution_loop,
+        mesh_coordinator=mesh_coordinator,
     )
 
 
@@ -192,6 +201,16 @@ def main(
     if core._cortex_hub is not None:
         cortex_status = "on (lock: " + ("yes" if core._cortex_hub.has_lock() else "no") + ")"
 
+    mesh_status_str = "off"
+    mesh_color = "red"
+    if core.mesh is not None:
+        if core.mesh.am_i_leader:
+            mesh_status_str = "LEADER"
+            mesh_color = "green"
+        else:
+            mesh_status_str = f"WORKER (leader: {core.mesh.leader_id or '?'})"
+            mesh_color = "cyan"
+
     console.print(
         Panel.fit(
             f"[bold cyan]EIDOS[/] v{__version__}\n"
@@ -201,6 +220,7 @@ def main(
             f"Consolidador: [{'green' if core._consolidator and core._consolidator.is_running() else 'red'}]"
             f"{'running' if core._consolidator and core._consolidator.is_running() else 'stopped'}[/]\n"
             f"Cortex Hub: [{'green' if cortex_status != 'off' else 'red'}]{cortex_status}[/]\n"
+            f"MESH: [{mesh_color}]{mesh_status_str}[/{mesh_color}]\n"
             f"Escribe [bold]exit[/] o [bold]Ctrl-D[/] para salir.",
             title="🧠 Cognitive Core",
             border_style="cyan",
@@ -814,6 +834,80 @@ def capsules_sandbox_test(ctx: click.Context, code: str | None, file_path: Path 
         console.print(f"[bold red]Violations:[/]")
         for v in result.security_violations:
             console.print(f"  • {v}")
+
+
+# ---------------------------------------------------------------------------
+# Subcomandos: mesh (Fase 4)
+# ---------------------------------------------------------------------------
+
+
+@main.group()
+@click.pass_context
+def mesh(ctx: click.Context) -> None:
+    """Estado del enjambre EIDOS MESH."""
+    pass
+
+
+@mesh.command(name="status")
+@click.pass_context
+def mesh_status(ctx: click.Context) -> None:
+    """Muestra el estado del MeshCoordinator local."""
+    obj = ctx.obj or {}
+    config = obj.get("config") or load_config(None)
+    project_root = obj.get("project_root") or DEFAULT_CONFIG_PATH.resolve().parent.parent
+    configure_logging(level="WARNING", format="console")
+    memory = MemoryStore.from_config(config, project_root)
+
+    from eidos.mesh.coordinator import MeshCoordinator
+
+    mesh_cfg = config.get("mesh", {})
+    if not mesh_cfg.get("enabled", False):
+        console.print(
+            Panel(
+                "El MESH está deshabilitado en config/eidos.yaml.\n"
+                "Para activarlo:\n\n"
+                "  mesh:\n"
+                "    enabled: true\n"
+                "    transport: unix_socket\n"
+                "    heartbeat_sec: 2\n"
+                "    leader_timeout_sec: 6",
+                title="🚫 MESH deshabilitado",
+                border_style="yellow",
+            )
+        )
+        return
+
+    coord = MeshCoordinator.from_config(config, db_path=memory.db_path, project_root=project_root)
+    coord.start()
+    try:
+        import time
+
+        time.sleep(0.3)  # dar tiempo a la elección
+        s = coord.stats()
+        role_color = "green" if s["am_i_leader"] else "cyan"
+        console.print(
+            Panel(
+                f"[bold]Node ID:[/] [dim]{s['node_id']}[/]\n"
+                f"[bold]Role:[/] [{role_color}]{s['role']}[/{role_color}]\n"
+                f"[bold]Leader:[/] {s['leader_id'] or 'none'}\n"
+                f"[bold]Socket:[/] {s['socket']}\n"
+                f"[bold]Peers conocidos:[/] {s['peers']}",
+                title="🌐 EIDOS MESH Status",
+                border_style=role_color,
+            )
+        )
+        if "arbitrator" in s:
+            arb = s["arbitrator"]
+            atable = Table(title="Resource tokens activos", show_header=True, header_style="bold yellow")
+            atable.add_column("Recurso", style="bold")
+            atable.add_column("Tokens activos", style="white")
+            for resource, count in arb.get("by_resource", {}).items():
+                atable.add_row(resource, str(count))
+            if not arb.get("by_resource"):
+                atable.add_row("[dim]none[/]", "[dim]0[/]")
+            console.print(atable)
+    finally:
+        coord.stop()
 
 
 # ---------------------------------------------------------------------------

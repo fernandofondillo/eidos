@@ -96,7 +96,7 @@ Multi-instancia cooperativa en un mismo dispositivo:
 - ✅ **Fase 1.3**: Motivación intrínseca (3 drivers) + consolidador background. 108 tests.
 - ✅ **Fase 2**: Cortex Hub (ModelManager + LlamaCppBackend + Embeddings + APIFallback + PrivacyFilter). 158 tests.
 - ✅ **Fase 3**: Génesis de cápsulas + Tool Sandbox (defense-in-depth) + EvolutionLoop. 229 tests.
-- ⏳ Fase 4: EIDOS MESH (sockets UNIX + leader election + arbitraje).
+- ✅ **Fase 4**: EIDOS MESH (sockets UNIX + leader election + arbitrator + MeshCoordinator). 279 tests.
 - ⏳ Fase 5: UI Tauri v2 + empaquetado cross-platform.
 
 ## 6. Memoria cognitiva (Fase 1.2) — detalle de implementación
@@ -313,3 +313,90 @@ capsule_drafts(
     metadata JSON
 )
 ```
+
+## 10. EIDOS MESH (Fase 4) — detalle de implementación
+
+### Componentes
+
+| Componente | Archivo | Rol |
+|-----------|---------|-----|
+| protocol | `eidos/mesh/protocol.py` | JSON-RPC 2.0 adaptado + Pydantic schemas |
+| transport | `eidos/mesh/transport.py` | Sockets UNIX (POSIX), server y cliente |
+| election | `eidos/mesh/election.py` | Lockfile atómico + heartbeat anti split-brain |
+| bus | `eidos/mesh/bus.py` | Pub/sub + request/response, entrega local + remota |
+| arbitrator | `eidos/mesh/arbitrator.py` | Resource tokens con TTL anti-deadlock |
+| coordinator | `eidos/mesh/coordinator.py` | Facade unificada |
+
+### Leader Election (2 mecanismos anti split-brain)
+
+```python
+# 1. Lockfile atómico (POSIX O_CREAT|O_EXCL)
+fd = os.open(lockfile, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+# Operación atómica del SO: solo un proceso gana.
+
+# 2. Heartbeat cada 2s
+if time.time() - last_heartbeat > 6.0:  # leader_timeout_sec
+    # Re-elección: borrar lockfile stale si PID muerto, intentar de nuevo
+    election._try_reelection()
+```
+
+### Resource Tokens (arbitraje)
+
+```python
+# Worker pide recurso al Leader vía RPC
+token = mesh.acquire_resource('cortex', ttl_sec=30)
+# → si soy Leader: local directo
+# → si soy Worker: send_request_to_leader('acquire_token', ...)
+
+# TTL anti-deadlock: si Worker muere, token expira a los 30s
+arb.expire_due()  # llamado periódicamente por el consolidador
+
+# Liberación explícita
+mesh.release_resource(token.token_id)
+# → si Worker muere sin liberar: release_all_for_holder() en GOODBYE handler
+```
+
+### CortexHub refactorizado (misma API)
+
+```python
+# Fase 2: fcntl local
+hub = CortexHub(model_manager=mm)
+
+# Fase 4: resource_token MESH distribuido
+hub = CortexHub(model_manager=mm, mesh_coordinator=coord)
+
+# Misma API pública:
+hub.try_acquire_lock(role="primary", ttl_sec=60.0)  # → bool
+hub.release_lock()
+hub.has_lock()
+```
+
+### Tablas SQLite (migración 0005)
+
+```sql
+mesh_nodes(
+    id TEXT PRIMARY KEY,       -- UUID de la instancia
+    pid INTEGER, hostname, socket_path,
+    role TEXT,                 -- 'leader' | 'worker' | 'candidate'
+    status TEXT,               -- 'alive' | 'dead' | 'leaving'
+    last_heartbeat, started_at, metadata
+)
+
+resource_tokens(
+    token_id TEXT PRIMARY KEY,
+    resource TEXT,             -- 'cortex' | 'memory_write' | 'sandbox'
+    holder_node_id TEXT,
+    acquired_at, expires_at,   -- TTL
+    released_at,               -- NULL hasta liberación
+    metadata
+)
+```
+
+### Tests E2E
+
+`tests/test_mesh_coordinator.py` crea dos coordinators reales con sockets UNIX y verifica:
+- Leader election (uno gana, otro es worker).
+- HELLO registration (worker se registra con leader).
+- Resource acquisition (worker pide token vía RPC al leader).
+- Concurrent acquire denied (segundo token para mismo recurso → None).
+- Stats y lifecycle (start/stop idempotente).
