@@ -18,6 +18,13 @@ interface KeyInfo {
   preview: string;
 }
 
+interface ActiveProvider {
+  api_type: string;
+  model: string;
+  base_url: string;
+  api_key_env: string;
+}
+
 interface DownloadStatus {
   active: boolean;
   model_id: string | null;
@@ -46,9 +53,16 @@ async function apiPost<T>(path: string, body?: any): Promise<T> {
   return r.json();
 }
 
+async function apiDelete<T>(path: string): Promise<T> {
+  const r = await fetch(`${API_BASE}${path}`, { method: 'DELETE' });
+  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+  return r.json();
+}
+
 export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [providers, setProviders] = useState<Provider[]>([]);
   const [keys, setKeys] = useState<Record<string, KeyInfo>>({});
+  const [activeProvider, setActiveProvider] = useState<ActiveProvider | null>(null);
   const [inputValues, setInputValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
@@ -60,12 +74,14 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
 
   const loadAll = useCallback(async () => {
     try {
-      const [prov, keysResp] = await Promise.all([
+      const [prov, keysResp, activeResp] = await Promise.all([
         apiGet<{ providers: Provider[] }>('/api/providers'),
         apiGet<{ keys: Record<string, KeyInfo> }>('/api/config/keys'),
+        apiGet<{ active: ActiveProvider | null; effective_backend: string }>('/api/config/active_provider'),
       ]);
       setProviders(prov.providers);
       setKeys(keysResp.keys);
+      setActiveProvider(activeResp.active);
     } catch (err) {
       setMessage({ type: 'error', text: `Error cargando: ${err}` });
     }
@@ -118,7 +134,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
       await apiPost('/api/config/keys', { keys: { [envVar]: value.trim() } });
       setInputValues({ ...inputValues, [envVar]: '' });
       await loadAll();
-      setMessage({ type: 'success', text: 'API key guardada. Se aplicará en caliente.' });
+      setMessage({ type: 'success', text: 'API key guardada. Ya puedes activar este provider.' });
     } catch (err) {
       setMessage({ type: 'error', text: `Error guardando: ${err}` });
     } finally {
@@ -135,6 +151,32 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
       setMessage({ type: 'info', text: 'API key borrada.' });
     } catch (err) {
       setMessage({ type: 'error', text: `Error borrando: ${err}` });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleActivateProvider = async (providerId: string, providerName: string) => {
+    setSaving(true);
+    try {
+      const resp = await apiPost<{ note: string }>('/api/config/active_provider', { provider_id: providerId });
+      await loadAll();
+      setMessage({ type: 'success', text: resp.note || `EIDOS ahora piensa con ${providerName}.` });
+    } catch (err) {
+      setMessage({ type: 'error', text: `Error activando: ${err}` });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeactivateProvider = async () => {
+    setSaving(true);
+    try {
+      await apiDelete('/api/config/active_provider');
+      await loadAll();
+      setMessage({ type: 'info', text: 'EIDOS volvió al modo stub.' });
+    } catch (err) {
+      setMessage({ type: 'error', text: `Error desactivando: ${err}` });
     } finally {
       setSaving(false);
     }
@@ -161,6 +203,9 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
     const i = Math.floor(Math.log(b) / Math.log(k));
     return `${(b / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
   };
+
+  // Determinar qué provider está activo comparando api_key_env
+  const activeProviderId = providers.find(p => p.env_var === activeProvider?.api_key_env)?.id;
 
   return (
     <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
@@ -191,6 +236,29 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               }`}
             >
               {message.text}
+            </div>
+          )}
+
+          {/* Provider activo actual */}
+          {activeProvider && (
+            <div className="p-3 bg-eidos-primary/10 border border-eidos-primary rounded">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-bold text-eidos-primary">
+                    ✅ EIDOS está pensando con: {activeProvider.model}
+                  </p>
+                  <p className="text-xs text-eidos-muted">
+                    Tipo: {activeProvider.api_type} · {activeProvider.base_url}
+                  </p>
+                </div>
+                <button
+                  onClick={handleDeactivateProvider}
+                  disabled={saving}
+                  className="btn-danger text-xs"
+                >
+                  Desactivar
+                </button>
+              </div>
             </div>
           )}
 
@@ -283,39 +351,47 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               Configura APIs externas para que EIDOS use modelos en la nube.
               Las keys se guardan localmente en{' '}
               <code className="bg-eidos-bg px-1 rounded">.env</code> y nunca se envían a ningún servidor
-              salvo al provider elegido.
+              salvo al provider elegido. Tras guardar una key, pulsa <strong>"Usar este provider"</strong> para activarlo.
             </p>
 
             <div className="space-y-3">
               {providers.map(p => {
                 const keyInfo = keys[p.id];
                 const isSet = keyInfo?.set;
+                const isActive = activeProviderId === p.id;
                 return (
                   <div
                     key={p.id}
-                    className="bg-eidos-bg border border-eidos-border rounded p-3"
+                    className={`bg-eidos-bg border rounded p-3 ${
+                      isActive ? 'border-eidos-primary' : 'border-eidos-border'
+                    }`}
                   >
                     <div className="flex items-start justify-between mb-2">
                       <div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <span className="font-medium text-sm">{p.name}</span>
                           {isSet ? (
                             <span className="badge bg-eidos-primary text-black text-xs">
-                              ✓ Configurada
+                              ✓ Key configurada
                             </span>
                           ) : (
                             <span className="badge bg-eidos-muted text-eidos-text text-xs">
                               Sin configurar
                             </span>
                           )}
+                          {isActive && (
+                            <span className="badge bg-eidos-accent text-black text-xs">
+                              ★ Activo
+                            </span>
+                          )}
                         </div>
                         <p className="text-xs text-eidos-muted mt-1">{p.description}</p>
                         <p className="text-xs text-eidos-muted">
-                          Modelo por defecto: <code>{p.default_model}</code>
+                          Modelo: <code>{p.default_model}</code> · Protocolo: <code>{p.api_type}</code>
                         </p>
                         {isSet && (
                           <p className="text-xs text-eidos-muted mt-1">
-                            Key actual: <code>{keyInfo.preview}</code>
+                            Key: <code>{keyInfo.preview}</code>
                           </p>
                         )}
                       </div>
@@ -328,7 +404,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
                         Obtener key ↗
                       </a>
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex gap-2 flex-wrap">
                       <input
                         type="password"
                         value={inputValues[p.env_var] || ''}
@@ -336,7 +412,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
                           setInputValues({ ...inputValues, [p.env_var]: e.target.value })
                         }
                         placeholder={isSet ? '••••••••••••••••' : `Pega tu ${p.env_var} aquí`}
-                        className="input flex-1 text-sm"
+                        className="input flex-1 text-sm min-w-[200px]"
                         disabled={saving}
                       />
                       <button
@@ -346,6 +422,16 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
                       >
                         Guardar
                       </button>
+                      {isSet && !isActive && (
+                        <button
+                          onClick={() => handleActivateProvider(p.id, p.name)}
+                          disabled={saving}
+                          className="btn-secondary text-sm"
+                          title="Hacer que EIDOS use este provider para pensar"
+                        >
+                          ⚡ Usar este provider
+                        </button>
+                      )}
                       {isSet && (
                         <button
                           onClick={() => handleClearKey(p.env_var)}
@@ -372,6 +458,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               <li>El Cerebro Local (Qwen 2.5 3B) corre 100% offline en tu dispositivo.</li>
               <li>Si usas APIs externas, EIDOS aplica PrivacyFilter automáticamente (redacta emails, IPs, teléfonos, etc. antes de enviar).</li>
               <li>Puedes borrar cualquier key cuando quieras con el botón "Borrar".</li>
+              <li>Puedes cambiar de provider activo en cualquier momento con "Usar este provider".</li>
             </ul>
           </section>
         </div>

@@ -287,6 +287,19 @@ class TestProviders:
         assert "anthropic" in ids
         assert "minimax" in ids
 
+    async def test_minimax_anthropic_provider_present(self, client: AsyncClient) -> None:
+        """Fase 6: MiniMax-M3 vía Anthropic debe estar en el catálogo."""
+        r = await client.get("/api/providers")
+        data = r.json()
+        ids = [p["id"] for p in data["providers"]]
+        assert "minimax_anthropic" in ids
+        # Verificar configuración correcta
+        minimax_anth = next(p for p in data["providers"] if p["id"] == "minimax_anthropic")
+        assert minimax_anth["api_type"] == "anthropic"
+        assert minimax_anth["base_url"] == "https://api.minimax.io/anthropic"
+        assert minimax_anth["default_model"] == "MiniMax-M3"
+        assert minimax_anth["env_var"] == "MINIMAX_ANTHROPIC_API_KEY"
+
 
 class TestApiKeys:
     async def test_get_keys_empty(self, client: AsyncClient) -> None:
@@ -346,6 +359,97 @@ class TestApiKeys:
             json={"env_var": "UNKNOWN_VAR"},
         )
         assert r.status_code == 422
+
+    async def test_save_minimax_anthropic_key(self, client: AsyncClient) -> None:
+        """Fase 6: guardar key de MiniMax-M3 vía Anthropic."""
+        r = await client.post(
+            "/api/config/keys",
+            json={"keys": {"MINIMAX_ANTHROPIC_API_KEY": "mm-ant-test12345678901234"}},
+        )
+        assert r.status_code == 200
+        # Verificar que aparece como set
+        r2 = await client.get("/api/config/keys")
+        data = r2.json()
+        assert data["keys"]["minimax_anthropic"]["set"] is True
+
+
+# ---------------------------------------------------------------------------
+# Active Provider (Fase 6) — seleccionar qué provider usa EIDOS para pensar
+# ---------------------------------------------------------------------------
+
+
+class TestActiveProvider:
+    async def test_get_active_provider_initial_none(self, client: AsyncClient) -> None:
+        r = await client.get("/api/config/active_provider")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["active"] is None
+        assert data["effective_backend"] in ("stub", "auto")
+
+    async def test_set_active_provider_requires_key(self, client: AsyncClient) -> None:
+        """No se puede activar un provider sin haber configurado su key antes."""
+        r = await client.post(
+            "/api/config/active_provider",
+            json={"provider_id": "minimax_anthropic"},
+        )
+        assert r.status_code == 400
+        assert "not configured" in r.json()["detail"].lower()
+
+    async def test_set_active_provider_unknown(self, client: AsyncClient) -> None:
+        r = await client.post(
+            "/api/config/active_provider",
+            json={"provider_id": "nonexistent"},
+        )
+        assert r.status_code == 404
+
+    async def test_set_active_provider_missing_id(self, client: AsyncClient) -> None:
+        r = await client.post("/api/config/active_provider", json={})
+        assert r.status_code == 422
+
+    async def test_activate_minimax_anthropic_with_key(
+        self, client: AsyncClient
+    ) -> None:
+        """Flujo completo: guardar key de MiniMax-M3 → activar provider → verificar."""
+        # 1. Guardar key
+        await client.post(
+            "/api/config/keys",
+            json={"keys": {"MINIMAX_ANTHROPIC_API_KEY": "mm-ant-test12345678901234"}},
+        )
+        # 2. Activar provider
+        r = await client.post(
+            "/api/config/active_provider",
+            json={"provider_id": "minimax_anthropic"},
+        )
+        assert r.status_code == 200
+        data = r.json()
+        assert data["active"] is True
+        assert data["api_type"] == "anthropic"
+        assert data["model"] == "MiniMax-M3"
+        # 3. Verificar que está activo
+        r2 = await client.get("/api/config/active_provider")
+        data2 = r2.json()
+        assert data2["active"] is not None
+        assert data2["active"]["api_type"] == "anthropic"
+        assert data2["active"]["model"] == "MiniMax-M3"
+        assert data2["effective_backend"] == "api"
+
+    async def test_clear_active_provider(self, client: AsyncClient) -> None:
+        # Activar primero
+        await client.post(
+            "/api/config/keys",
+            json={"keys": {"OPENAI_API_KEY": "sk-test12345678901234567890"}},
+        )
+        await client.post(
+            "/api/config/active_provider",
+            json={"provider_id": "openai"},
+        )
+        # Desactivar
+        r = await client.delete("/api/config/active_provider")
+        assert r.status_code == 200
+        assert r.json()["cleared"] is True
+        # Verificar
+        r2 = await client.get("/api/config/active_provider")
+        assert r2.json()["active"] is None
 
 
 # ---------------------------------------------------------------------------

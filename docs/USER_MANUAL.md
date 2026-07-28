@@ -470,7 +470,8 @@ Verás una lista de providers soportados:
 |----------|----------|------------------|
 | **OpenAI** | GPT-4o, GPT-4, GPT-3.5 | platform.openai.com/api-keys |
 | **Anthropic Claude** | Claude 3.5 Sonnet, Opus | console.anthropic.com |
-| **MiniMax** | MiniMax Text 01 (buen español) | platform.minimaxi.com |
+| **MiniMax (API nativa)** | MiniMax Text 01 (buen español) | platform.minimaxi.com |
+| **MiniMax-M3 (vía Anthropic)** | MiniMax-M3 con protocolo Anthropic (TOKEN plan) | platform.minimaxi.com |
 | **OpenRouter** | Acceso a 100+ modelos con una key | openrouter.ai/keys |
 | **Together.ai** | Llama, Mixtral (open-source) | api.together.ai |
 | **Groq** | Inferencia ultra-rápida | console.groq.com |
@@ -482,6 +483,21 @@ Para cada uno:
 4. Haz clic en **Guardar**.
 5. La key se guarda en `.env` local (en tu SSD, nunca en la nube).
 6. Se aplica **en caliente**: no necesitas reiniciar EIDOS.
+7. **Para activar el provider**: tras guardar la key, aparecerá un botón **"⚡ Usar este provider"**. Haz clic en él para que EIDOS empiece a pensar con ese modelo.
+
+> **💡 MiniMax-M3 vía Anthropic (TOKEN plan)**: Esta opción te permite usar el modelo MiniMax-M3 a través del endpoint compatible con Anthropic (`api.minimax.io/anthropic`). Solo necesitas tu API key de MiniMax — EIDOS se encarga del protocolo automáticamente. Es ideal si tienes el TOKEN plan de MiniMax y quieres un modelo con excelente razonamiento en español sin instalar nada localmente.
+
+##### ¿Cómo cambiar de provider en caliente?
+
+Una vez que tengas al menos una API key configurada, verás el botón **"⚡ Usar este provider"** junto a cada provider con key guardada. Al hacer clic:
+
+1. EIDOS construye un `APIFallbackBackend` con la configuración correcta de ese provider.
+2. Lo inyecta en el núcleo cognitivo **sin reiniciar el servidor**.
+3. A partir de ese momento, todos tus mensajes se procesan con ese modelo.
+4. Verás un banner verde arriba: "✅ EIDOS está pensando con: [modelo]".
+5. Para volver al modo local (stub o Cerebro Local), haz clic en **"Desactivar"** en ese banner.
+
+Puedes cambiar de provider tantas veces como quieras. Tu memoria (5 capas) se preserva siempre, sin importar qué provider uses.
 
 #### ¿Qué pasa si uso APIs externas? ¿Sigo teniendo privacidad?
 

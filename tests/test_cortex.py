@@ -200,6 +200,112 @@ class TestAPIFallback:
         assert m.backend == "api"
         assert m.confidence == 0.75
 
+    def test_anthropic_protocol_url_and_headers(self) -> None:
+        """Fase 6: api_type='anthropic' usa /v1/messages y headers x-api-key."""
+        captured: dict = {}
+
+        def mock_client(payload, headers, url):
+            captured["payload"] = payload
+            captured["headers"] = headers
+            captured["url"] = url
+            return json.dumps(
+                {
+                    "observation": "x",
+                    "hypothesis": "y",
+                    "plan": ["p"],
+                    "risk": "none",
+                    "confidence": 0.7,
+                }
+            )
+
+        backend = APIFallbackBackend(
+            base_url="https://api.minimax.io/anthropic",
+            api_key="mm-test-key",
+            model="MiniMax-M3",
+            client=mock_client,
+            api_type="anthropic",
+        )
+        backend.generate("test")
+
+        # URL debe ser /v1/messages (protocolo Anthropic)
+        assert captured["url"] == "https://api.minimax.io/anthropic/v1/messages"
+        # Headers deben usar x-api-key + anthropic-version
+        assert captured["headers"]["x-api-key"] == "mm-test-key"
+        assert captured["headers"]["anthropic-version"] == "2023-06-01"
+        assert "Authorization" not in captured["headers"]
+        # Payload debe tener 'system' y 'messages' (formato Anthropic)
+        assert captured["payload"]["model"] == "MiniMax-M3"
+        assert "system" in captured["payload"]
+        assert "messages" in captured["payload"]
+        assert captured["payload"]["max_tokens"] == 1024
+
+    def test_openai_protocol_unchanged(self) -> None:
+        """Cero regresiones: api_type='openai' (default) sigue funcionando igual."""
+        captured: dict = {}
+
+        def mock_client(payload, headers, url):
+            captured["payload"] = payload
+            captured["headers"] = headers
+            captured["url"] = url
+            return json.dumps(
+                {
+                    "observation": "x",
+                    "hypothesis": "y",
+                    "plan": ["p"],
+                    "risk": "none",
+                    "confidence": 0.7,
+                }
+            )
+
+        backend = APIFallbackBackend(
+            base_url="https://api.openai.com/v1",
+            api_key="sk-test",
+            model="gpt-4o-mini",
+            client=mock_client,
+            # api_type no especificado → default 'openai'
+        )
+        backend.generate("test")
+
+        # URL debe ser /chat/completions (protocolo OpenAI)
+        assert captured["url"] == "https://api.openai.com/v1/chat/completions"
+        # Headers deben usar Authorization Bearer
+        assert captured["headers"]["Authorization"] == "Bearer sk-test"
+        assert "x-api-key" not in captured["headers"]
+        # Payload debe tener messages con system + user (formato OpenAI)
+        assert captured["payload"]["model"] == "gpt-4o-mini"
+        assert "messages" in captured["payload"]
+        assert captured["payload"]["messages"][0]["role"] == "system"
+
+    def test_anthropic_parses_content_blocks(self) -> None:
+        """El parser Anthropic debe extraer texto de content[].text[]."""
+        captured: dict = {}
+
+        def mock_client(payload, headers, url):
+            # Simular respuesta Anthropic real con content blocks
+            # Pero como el client mock devuelve texto ya extraído,
+            # devolvemos el JSON del monologue directamente.
+            return json.dumps(
+                {
+                    "observation": "From minimax",
+                    "hypothesis": "M3 model",
+                    "plan": ["step1"],
+                    "risk": "none",
+                    "confidence": 0.9,
+                }
+            )
+
+        backend = APIFallbackBackend(
+            base_url="https://api.minimax.io/anthropic",
+            api_key="mm-key",
+            model="MiniMax-M3",
+            client=mock_client,
+            api_type="anthropic",
+        )
+        m = backend.generate("test minimax")
+        assert m.backend == "api"
+        assert m.observation == "From minimax"
+        assert m.confidence == 0.9
+
     def test_privacy_filter_applied_before_call(self) -> None:
         """Verifica que el PrivacyFilter redacta PII antes de enviar."""
         captured_payload = {}

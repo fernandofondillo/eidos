@@ -488,6 +488,110 @@ async def clear_keys(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Provider Activo (Fase 6) — seleccionar qué provider usar para pensar
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/config/active_provider")
+async def get_active_provider() -> dict[str, Any]:
+    """Devuelve el provider activo actual (o None si usa stub/llama_cpp)."""
+    core = get_core()
+    api_backend = core.api_backend
+    if api_backend is None:
+        return {"active": None, "effective_backend": core._effective_backend}
+    return {
+        "active": {
+            "api_type": getattr(api_backend, "_api_type", "openai"),
+            "model": getattr(api_backend, "_model", "?"),
+            "base_url": getattr(api_backend, "_base_url", "?"),
+            "api_key_env": getattr(api_backend, "_api_key_env", "?"),
+        },
+        "effective_backend": core._effective_backend,
+    }
+
+
+@app.post("/api/config/active_provider")
+async def set_active_provider(payload: dict[str, Any]) -> dict[str, Any]:
+    """Activa un provider como backend de monólogo en caliente.
+
+    Espera: {"provider_id": "minimax_anthropic"}
+    Construye el APIFallbackBackend con base_url, api_key_env, model y
+    api_type del provider seleccionado, y lo inyecta en EidosCore.
+
+    Requiere que la API key del provider esté configurada previamente
+    (vía POST /api/config/keys).
+    """
+    provider_id = payload.get("provider_id")
+    if not provider_id:
+        raise HTTPException(status_code=422, detail="'provider_id' required")
+
+    provider = get_provider(provider_id)
+    if provider is None:
+        raise HTTPException(status_code=404, detail=f"Unknown provider: {provider_id}")
+
+    # Verificar que la API key está configurada
+    keys = _read_env_keys()
+    api_key = keys.get(provider.env_var, "")
+    if not api_key:
+        raise HTTPException(
+            status_code=400,
+            detail=f"API key for {provider.name} not configured. Set it first via /api/config/keys.",
+        )
+
+    # Asegurar que la key está en os.environ para que APIFallbackBackend la lea
+    os.environ[provider.env_var] = api_key
+
+    # Construir el APIFallbackBackend con el api_type correcto
+    from eidos.cortex.api_fallback import APIFallbackBackend
+
+    backend = APIFallbackBackend(
+        base_url=provider.base_url,
+        api_key_env=provider.env_var,
+        model=provider.default_model,
+        api_type=provider.api_type,
+    )
+
+    # Inyectar en el core (activa backend='api' en caliente)
+    core = get_core()
+    core.set_api_backend(backend)
+
+    logger.info(
+        "active_provider_set",
+        provider_id=provider_id,
+        api_type=provider.api_type,
+        model=provider.default_model,
+    )
+    return {
+        "active": True,
+        "provider_id": provider_id,
+        "provider_name": provider.name,
+        "api_type": provider.api_type,
+        "model": provider.default_model,
+        "note": f"EIDOS ahora piensa con {provider.name} ({provider.default_model}).",
+    }
+
+
+@app.delete("/api/config/active_provider")
+async def clear_active_provider() -> dict[str, Any]:
+    """Desactiva el provider API y vuelve al backend anterior (stub o llama_cpp)."""
+    core = get_core()
+    # Para desactivar, reconstruimos el backend con la config original
+    # Simplemente ponemos _api_backend a None y el _resolve_backend usará stub
+    core._api_backend = None
+    # Reconstruir generador con stub
+    from eidos.core.monologue import MonologueGenerator
+
+    core._generator = MonologueGenerator(
+        backend="stub",
+        monologues_dir=core._monologues_dir,
+        max_plan_steps=core._max_plan_steps,
+    )
+    core._effective_backend = "stub"
+    logger.info("active_provider_cleared")
+    return {"cleared": True, "note": "EIDOS volvió al modo stub."}
+
+
+# ---------------------------------------------------------------------------
 # Model Manager — registrar y descargar Cerebro Local (Fase 6)
 # ---------------------------------------------------------------------------
 

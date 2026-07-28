@@ -35,7 +35,8 @@ class ApiProvider:
 # Catálogo de providers soportados.
 # Cualquier API compatible con OpenAI (chat completions) puede añadirse
 # aquí con api_type='openai'. Anthropic usa su propio protocolo.
-# MiniMax usa su propio protocolo también.
+# MiniMax ofrece dos vías: su API nativa (api_type='minimax') y vía
+# endpoint compatible Anthropic (api_type='anthropic', base_url de minimax.io).
 PROVIDERS: list[ApiProvider] = [
     ApiProvider(
         id="openai",
@@ -59,13 +60,27 @@ PROVIDERS: list[ApiProvider] = [
     ),
     ApiProvider(
         id="minimax",
-        name="MiniMax",
+        name="MiniMax (API nativa)",
         env_var="MINIMAX_API_KEY",
         api_type="minimax",
         base_url="https://api.minimaxi.chat/v1",
         default_model="MiniMax-Text-01",
         docs_url="https://platform.minimaxi.com/user-center/basic-information/interface-search",
-        description="MiniMax Text 01. Buen razonamiento en español.",
+        description="MiniMax Text 01 vía API nativa. Buen razonamiento en español.",
+    ),
+    ApiProvider(
+        id="minimax_anthropic",
+        name="MiniMax-M3 (vía Anthropic)",
+        env_var="MINIMAX_ANTHROPIC_API_KEY",
+        api_type="anthropic",
+        base_url="https://api.minimax.io/anthropic",
+        default_model="MiniMax-M3",
+        docs_url="https://platform.minimaxi.com/user-center/basic-information/interface-search",
+        description=(
+            "MiniMax-M3 a través del endpoint compatible con Anthropic "
+            "(api.minimax.io/anthropic). Usa el TOKEN plan de MiniMax con "
+            "el protocolo de Claude. Solo necesitas tu API key de MiniMax."
+        ),
     ),
     ApiProvider(
         id="openrouter",

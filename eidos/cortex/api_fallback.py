@@ -37,7 +37,16 @@ logger = get_logger(__name__)
 
 
 class APIFallbackBackend(MonologueBackend):
-    """Backend de monólogo vía API externa (compatible OpenAI).
+    """Backend de monólogo vía API externa (compatible OpenAI o Anthropic).
+
+    Soporta dos protocolos:
+    - api_type='openai' (default): endpoint /chat/completions con body
+      {model, messages, ...}. Compatible con OpenAI, OpenRouter, Together,
+      Groq, MiniMax nativa, etc.
+    - api_type='anthropic': endpoint /v1/messages con body
+      {model, max_tokens, messages, system} y headers x-api-key +
+      anthropic-version. Compatible con Anthropic Claude oficial y con
+      MiniMax-M3 vía api.minimax.io/anthropic.
 
     Aplica PrivacyFilter al prompt antes de enviar.
     """
@@ -53,6 +62,7 @@ class APIFallbackBackend(MonologueBackend):
         max_retries: int = 2,
         privacy_filter: PrivacyFilter | None = None,
         client: Any = None,
+        api_type: str = "openai",
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key or os.environ.get(api_key_env)
@@ -64,6 +74,7 @@ class APIFallbackBackend(MonologueBackend):
         self._privacy = privacy_filter or PrivacyFilter()
         # client inyectable para tests
         self._client = client  # callable(payload, headers, url) -> dict
+        self._api_type = api_type  # 'openai' | 'anthropic'
 
         if not self._api_key:
             logger.warning(
@@ -105,6 +116,12 @@ class APIFallbackBackend(MonologueBackend):
         raise RuntimeError(f"APIFallback failed after {self._max_retries} attempts: {last_error}")
 
     def _call_api(self, prompt: str) -> str:
+        """Llama al endpoint API según api_type (openai o anthropic)."""
+        if self._api_type == "anthropic":
+            return self._call_anthropic(prompt)
+        return self._call_openai(prompt)
+
+    def _call_openai(self, prompt: str) -> str:
         """Llama al endpoint /chat/completions compatible OpenAI."""
         payload = {
             "model": self._model,
@@ -150,11 +167,67 @@ class APIFallbackBackend(MonologueBackend):
         except urllib.error.URLError as e:
             raise RuntimeError(f"API network error: {e}") from e
 
+    def _call_anthropic(self, prompt: str) -> str:
+        """Llama al endpoint /v1/messages compatible Anthropic.
+
+        Usado por Anthropic Claude oficial y por MiniMax-M3 vía
+        api.minimax.io/anthropic.
+        """
+        payload = {
+            "model": self._model,
+            "max_tokens": 1024,
+            "system": "You are EIDOS, a cognitive entity. Respond ONLY with valid JSON.",
+            "messages": [
+                {"role": "user", "content": prompt},
+            ],
+        }
+
+        if self._client is not None:
+            # Test mode — el mock devuelve texto igual que OpenAI
+            return self._client(payload, self._headers(), self._url)
+
+        if not self._api_key:
+            raise RuntimeError(
+                f"API key not set. Configure env var {self._api_key_env} or pass api_key."
+            )
+
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            self._url,
+            data=data,
+            headers=self._headers(),
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+                # Anthropic devuelve {content: [{type: "text", text: "..."}]}
+                content_blocks = body.get("content", [])
+                if not content_blocks:
+                    raise ValueError(f"No content in Anthropic response: {body}")
+                # Concatenar todos los bloques de texto
+                texts = [b.get("text", "") for b in content_blocks if b.get("type") == "text"]
+                return "".join(texts)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Anthropic API HTTP {e.code}: {body[:300]}") from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Anthropic API network error: {e}") from e
+
     @property
     def _url(self) -> str:
+        if self._api_type == "anthropic":
+            return f"{self._base_url}/v1/messages"
         return f"{self._base_url}/chat/completions"
 
     def _headers(self) -> dict[str, str]:
+        if self._api_type == "anthropic":
+            # Anthropic usa x-api-key + anthropic-version
+            return {
+                "Content-Type": "application/json",
+                "x-api-key": self._api_key or "",
+                "anthropic-version": "2023-06-01",
+            }
         return {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._api_key or ''}",

@@ -96,6 +96,8 @@ class EidosCore:
         self._evolution_loop = evolution_loop
         self._mesh_coordinator = mesh_coordinator
         self._max_plan_steps = max_plan_steps
+        # Fase 6: APIFallbackBackend inyectable en caliente
+        self._api_backend: Any = None
 
         # Resolver backend real
         effective_backend, generator = self._resolve_backend(
@@ -132,7 +134,8 @@ class EidosCore:
         """Resuelve qué backend usar de forma robusta.
 
         - 'stub' → siempre stub.
-        - 'llama_cpp' | 'api' → usa ese directo (debe estar instalado).
+        - 'llama_cpp' → usa ese directo (debe estar instalado).
+        - 'api' → requiere que se inyecte un APIFallbackBackend vía set_api_backend().
         - 'auto' → intenta CortexHub (llama_cpp si hay modelo), fallback a stub.
         """
         if requested == "auto":
@@ -164,12 +167,59 @@ class EidosCore:
             )
 
         # Backend explícito
+        if requested == "api":
+            # Si ya hay un APIFallbackBackend inyectado, usarlo.
+            # Si no, degradar a stub (no hay API key configurada todavía).
+            if self._api_backend is not None:
+                gen = MonologueGenerator(
+                    backend="api",
+                    monologues_dir=monologues_dir,
+                    max_plan_steps=max_plan_steps,
+                    backend_instance=self._api_backend,
+                )
+                return "api", gen
+            logger.info("api_backend_not_configured_degraded_to_stub")
+            return "stub", MonologueGenerator(
+                backend="stub",
+                monologues_dir=monologues_dir,
+                max_plan_steps=max_plan_steps,
+            )
+
         gen = MonologueGenerator(
             backend=requested,
             monologues_dir=monologues_dir,
             max_plan_steps=max_plan_steps,
         )
         return requested, gen
+
+    def set_api_backend(self, backend: Any) -> None:
+        """Inyecta un APIFallbackBackend y activa el backend 'api' en caliente.
+
+        Fase 6: permite a la UI cambiar de provider (OpenAI, Anthropic,
+        MiniMax-M3 vía Anthropic, etc.) sin reiniciar el servidor.
+
+        Args:
+            backend: instancia de APIFallbackBackend ya configurada.
+        """
+        self._api_backend = backend
+        # Reconstruir el generador con el nuevo backend
+        self._generator = MonologueGenerator(
+            backend="api",
+            monologues_dir=self._monologues_dir,
+            max_plan_steps=self._max_plan_steps,
+            backend_instance=backend,
+        )
+        self._effective_backend = "api"
+        logger.info(
+            "eidos_api_backend_set",
+            api_type=getattr(backend, "_api_type", "openai"),
+            model=getattr(backend, "_model", "?"),
+        )
+
+    @property
+    def api_backend(self) -> Any:
+        """Devuelve el APIFallbackBackend activo, o None."""
+        return getattr(self, "_api_backend", None)
 
     def think_and_respond(self, user_input: str, context: str | None = None) -> Response:
         """Pipeline completo: input → memoria → monólogo → ruta → respuesta."""
