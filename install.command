@@ -240,11 +240,26 @@ export PATH="$UV_DIR:$VENV_DIR/bin:$PYTHON_DIR/bin:$PATH"
 
 echo -e "  ${DIM}Sincronizando dependencias (puede tardar 1-2 minutos)...${NC}"
 cd "$EIDOS_ROOT"
-if ! "$UV_BIN" sync --no-dev >/dev/null 2>&1; then
+if ! "$UV_BIN" sync --active --no-dev >/dev/null 2>&1; then
     echo -e "  ${YELLOW}⚠${NC}  Algunas dependencias opcionales no se instalaron (es normal)."
     echo -e "  ${DIM}EIDOS funcionará en modo básico. Puedes instalar extras más tarde.${NC}"
 else
     echo -e "  ${GREEN}✓${NC} Dependencias instaladas"
+fi
+
+# VERIFICACIÓN CRÍTICA: confirmar que structlog está en el venv correcto.
+# Si no lo está, el launcher fallará silenciosamente.
+if ! "$VENV_DIR/bin/python" -c "import structlog" >/dev/null 2>&1; then
+    echo -e "  ${YELLOW}⚠${NC}  Las dependencias no se instalaron en el venv correcto. Corrigiendo..."
+    "$UV_BIN" sync --active --no-dev >/dev/null 2>&1 || true
+    if ! "$VENV_DIR/bin/python" -c "import structlog" >/dev/null 2>&1; then
+        echo -e "  ${RED}✗${NC} Error crítico: las dependencias no se pudieron instalar."
+        echo -e "  ${DIM}Ejecuta manualmente: VIRTUAL_ENV=$VENV_DIR $UV_BIN sync --active --extra cortex${NC}"
+    else
+        echo -e "  ${GREEN}✓${NC} Dependencias verificadas en venv portable"
+    fi
+else
+    echo -e "  ${GREEN}✓${NC} Dependencias verificadas en venv portable"
 fi
 echo ""
 
@@ -427,21 +442,21 @@ if [[ "$WANT_CORTEX" == true ]]; then
         # Fallback Elegante (Anti-Fallo): envolvemos en if ! ... then.
         # Si la compilación con Metal falla por cualquier razón (C++, permisos,
         # versiones, etc.), el script NO ABORTA. Caemos a modo CPU y seguimos.
-        if ! CMAKE_ARGS="-DGGML_METAL=on" "$UV_BIN" sync --extra cortex >/dev/null 2>&1; then
+        if ! CMAKE_ARGS="-DGGML_METAL=on" "$UV_BIN" sync --active --extra cortex >/dev/null 2>&1; then
             echo -e "  ${YELLOW}⚙️  Activando modo de compatibilidad (CPU).${NC}"
             echo -e "  ${YELLOW}No te preocupes, EIDOS funcionará perfectamente y guardará toda tu memoria.${NC}"
             echo -e "  ${YELLOW}Podrás intentar activar la aceleración Metal más tarde desde el Panel de Configuración de la App.${NC}"
             echo ""
             echo -e "  ${DIM}Instalando cortex en modo CPU...${NC}"
             # Sin CMAKE_ARGS: instalación pura CPU, sin abortar si también falla.
-            "$UV_BIN" sync --extra cortex >/dev/null 2>&1 || true
+            "$UV_BIN" sync --active --extra cortex >/dev/null 2>&1 || true
         else
             echo -e "  ${GREEN}✓${NC} llama-cpp-python compilado con Metal (GPU activa)"
         fi
     else
         # El usuario no pidió Metal (o no tenía CLT): instalar cortex en modo CPU.
         echo -e "  ${DIM}Instalando dependencias del cerebro local (modo CPU)...${NC}"
-        "$UV_BIN" sync --extra cortex >/dev/null 2>&1 || true
+        "$UV_BIN" sync --active --extra cortex >/dev/null 2>&1 || true
     fi
 
     # Descargar el modelo GGUF usando el CLI de EIDOS
@@ -498,6 +513,26 @@ if [[ ! -d "$EIDOS_ROOT/.eidos_env" ]]; then
     exit 1
 fi
 
+# VERIFICACIÓN CRÍTICA: comprobar que las dependencias están instaladas.
+# Si no lo están, mostrar un error claro en vez de fallar silenciosamente.
+if ! "$PYTHON_BIN" -c "import structlog, fastapi, pydantic" >/dev/null 2>&1; then
+    echo "❌ Error: faltan dependencias de EIDOS."
+    echo ""
+    echo "Ejecuta este comando en Terminal para arreglarlo:"
+    echo ""
+    echo "  cd \"$EIDOS_ROOT\" && VIRTUAL_ENV=\"$EIDOS_ROOT/.eidos_env/venv\" \"$EIDOS_ROOT/.eidos_env/uv/uv\" sync --active --extra cortex"
+    echo ""
+    echo "O vuelve a ejecutar install.command."
+    echo ""
+    osascript -e "display dialog \"Faltan dependencias de EIDOS. Abre Terminal y ejecuta:
+
+cd \\\"$EIDOS_ROOT\\\" && VIRTUAL_ENV=\\\"$EIDOS_ROOT/.eidos_env/venv\\\" \\\"$EIDOS_ROOT/.eidos_env/uv/uv\\\" sync --active --extra cortex
+
+O vuelve a ejecutar install.command.\" with title \"EIDOS - Error\" buttons {\"OK\"} default button 1 with icon stop"
+    read -p "Pulsa ENTER para cerrar..."
+    exit 1
+fi
+
 # Matar instancias previas (si las hay)
 pkill -f "eidos web" 2>/dev/null || true
 sleep 0.5
@@ -511,12 +546,25 @@ echo "$SERVER_PID" > "$EIDOS_ROOT/.eidos_env/server.pid"
 
 # Esperar a que el servidor esté listo (máx 15 segundos)
 echo "Iniciando EIDOS..."
+READY=false
 for i in $(seq 1 30); do
     if curl -s http://127.0.0.1:8765/api/health >/dev/null 2>&1; then
+        READY=true
         break
     fi
     sleep 0.5
 done
+
+if [[ "$READY" != "true" ]]; then
+    echo "❌ EIDOS no pudo arrancar. Revisa el log:"
+    echo "  $LOG_FILE"
+    echo ""
+    echo "Últimas 10 líneas del log:"
+    tail -10 "$LOG_FILE" 2>/dev/null || echo "(log vacío)"
+    echo ""
+    read -p "Pulsa ENTER para cerrar..."
+    exit 1
+fi
 
 # Abrir navegador
 open "http://127.0.0.1:8765"
