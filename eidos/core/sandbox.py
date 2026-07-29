@@ -39,7 +39,7 @@ logger = get_logger(__name__)
 # Whitelist de módulos permitidos en el sandbox
 # ---------------------------------------------------------------------------
 
-# Módulos seguros: pure-python, sin IO de red/archivos del sistema.
+# Módulos seguros: pure-python + urllib para tools de red.
 _ALLOWED_MODULES: frozenset[str] = frozenset(
     {
         # Stdlib seguro
@@ -49,6 +49,8 @@ _ALLOWED_MODULES: frozenset[str] = frozenset(
         "string", "textwrap", "unicodedata", "difflib", "heapq",
         "bisect", "array", "queue", "uuid", "decimal", "fractions",
         "numbers", "pprint", "reprlib", "secrets",
+        # Red (para tools de acceso web — EIDOS las valida en sandbox)
+        "urllib.request", "urllib.parse", "urllib.error", "urllib",
         # EIDOS (limitado a utilidades safe)
         "eidos.utils.logging",  # solo para logging interno
     }

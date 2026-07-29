@@ -609,12 +609,14 @@ class EidosCore:
 
         input_lower = user_input.lower()
 
-        # Detectar si el usuario pide una herramienta
+        # Detectar si el usuario pide una herramienta o aprueba una propuesta
         tool_triggers = [
             "crea una tool", "crea una herramienta", "crea una función",
             "hazme una función", "hazme una tool", "crea un script",
             "escribe una función", "programa una función", "crea código que",
-            "crea una herramienta que",
+            "crea una herramienta que", "vamos a por ella", "intégrala",
+            "intégala", "hazlo", "regístrala", "aprueba", "procede",
+            "adelante", "sí, hazlo", "si hazlo", "vamos alla", "vamos a la",
         ]
         if not any(t in input_lower for t in tool_triggers):
             return None
