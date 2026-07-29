@@ -351,25 +351,32 @@ class EidosCore:
             if sem_ctx:
                 full_context = (full_context + "\n" if full_context else "") + sem_ctx
 
-            # c) CÁPSULA ACTIVA relevante
+            # c) CÁPSULAS ACTIVAS — inyectar estado REAL en el prompt
+            # El LLM debe saber qué cápsulas existen para no mentir.
             active_capsules = self._memory.procedural.list_all(include_expired=False)
-            relevant_capsules: list[str] = []
-            for cap in active_capsules:
-                name_lower = cap.name.lower()
-                topic = name_lower
-                for prefix in ("experto en ", "experta en ", "experto ", "experta "):
-                    if topic.startswith(prefix):
-                        topic = topic[len(prefix):]
-                        break
-                topic = topic.strip()
-                if topic and len(topic) >= 3:
-                    topic_words = [w for w in topic.split() if len(w) >= 3]
-                    input_lower = user_input.lower()
-                    if any(w in input_lower for w in topic_words) or topic in input_lower:
-                        relevant_capsules.append(cap.name)
-            if relevant_capsules:
-                caps_str = ", ".join(relevant_capsules)
-                full_context = (full_context + "\n" if full_context else "") + f"Especialidad activa: {caps_str}"
+            if active_capsules:
+                # Lista completa de cápsulas para que el LLM sepa qué hay
+                caps_list = "\n".join(f"- {c.name} (usos: {c.uses})" for c in active_capsules)
+                full_context = (full_context + "\n" if full_context else "") + f"Cápsulas activas ({len(active_capsules)}):\n{caps_list}"
+
+                # Además, marcar las relevantes al input actual
+                relevant_capsules: list[str] = []
+                for cap in active_capsules:
+                    name_lower = cap.name.lower()
+                    topic = name_lower
+                    for prefix in ("experto en ", "experta en ", "experto ", "experta ", "herramienta: "):
+                        if topic.startswith(prefix):
+                            topic = topic[len(prefix):]
+                            break
+                    topic = topic.strip()
+                    if topic and len(topic) >= 3:
+                        topic_words = [w for w in topic.split() if len(w) >= 3]
+                        input_lower = user_input.lower()
+                        if any(w in input_lower for w in topic_words) or topic in input_lower:
+                            relevant_capsules.append(cap.name)
+                if relevant_capsules:
+                    caps_str = ", ".join(relevant_capsules)
+                    full_context += f"\nEspecialidad relevante para este input: {caps_str}"
 
             # d) RESUMEN DE SESIONES ANTERIORES (cross-session memory)
             session_summary = self._load_session_summary()
@@ -803,47 +810,13 @@ class EidosCore:
                 except Exception as e:
                     logger.warning("auto_evolution_promote_failed", error=str(e))
 
-            # b) DETECTAR PATRÓN RECURRENTE
-            # Si el usuario ha preguntado por el mismo tema 3+ veces en
-            # los últimos eventos sensoriales, y no hay cápsula para eso,
-            # crear una automáticamente.
-            try:
-                recent = self._memory.sensory.recent(limit=20)
-                user_inputs = [ev.get("content", "").lower() for ev in recent if ev.get("kind") == "user_input"]
-
-                if len(user_inputs) >= 3:
-                    # Buscar palabra que aparezca en 3+ inputs
-                    from collections import Counter
-                    word_counts: Counter[str] = Counter()
-                    for inp in user_inputs:
-                        words = [w for w in inp.split() if len(w) >= 4]
-                        word_counts.update(words)
-
-                    for word, count in word_counts.most_common(5):
-                        if count >= 3:
-                            # Verificar si ya existe una cápsula para este tema
-                            existing_caps = self._memory.procedural.list_all()
-                            already_exists = any(
-                                word in c.name.lower() for c in existing_caps
-                            )
-                            if not already_exists:
-                                # Crear cápsula automáticamente
-                                from eidos.core.forge import CapsuleForge, StubForgeBackend
-                                forge = CapsuleForge(
-                                    db_path=self._memory.db_path,
-                                    procedural=self._memory.procedural,
-                                    backend=StubForgeBackend(),
-                                )
-                                draft, decision = forge.forge(
-                                    f"experto en {word}",
-                                    context={"requested_by": "auto_evolution_pattern"},
-                                )
-                                if decision.value == "auto_approved":
-                                    events.append(f"Cápsula auto-creada por patrón recurrente: Experto en {word}")
-                                    logger.info("auto_evolution_pattern_capsule", word=word, count=count)
-                                break  # solo 1 por turno
-            except Exception as e:
-                logger.warning("auto_evolution_pattern_failed", error=str(e))
+            # b) DETECTAR PATRÓN RECURRENTE — DESHABILITADO
+            # Esta funcionalidad generaba spam de cápsulas basura ("Experto en Hola",
+            # "Experto en Julio") porque cualquier palabra que apareciese 3 veces
+            # disparaba la creación. Ahora solo se crean cápsulas cuando el usuario
+            # lo pide explícitamente ("conviértete en experto en X").
+            # Para reactivar en el futuro, sería necesario un LLM que evalúe si
+            # el tema merece una especialización, no un contador de palabras.
 
             # c) AJUSTE DE CONFIANZA basado en reward acumulado
             if self._motivation is not None:

@@ -69,11 +69,13 @@ class TestCapsuleForgeDetection:
             assert any("marketing" in c.name.lower() for c in caps)
 
     def test_capsule_forge_creates_multiple(self, forge: CapsuleForge) -> None:
-        """Debe poder crear múltiples cápsulas."""
-        forge.forge("experto en python")
-        forge.forge("experto en rust")
-        caps = forge._procedural.list_all()
-        assert len(caps) >= 2
+        """Debe poder crear múltiples cápsulas (como drafts o activas)."""
+        draft1, dec1 = forge.forge("experto en python")
+        draft2, dec2 = forge.forge("experto en rust")
+        # Con threshold 0.85, el stub (0.75) genera pending_approval.
+        # Verificar que los drafts existen.
+        drafts = forge.list_drafts()
+        assert len(drafts) >= 2
 
     def test_capsule_draft_has_valid_schema(self, forge: CapsuleForge) -> None:
         """El draft debe tener schema válido."""

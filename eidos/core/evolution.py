@@ -31,13 +31,33 @@ from eidos.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-# Patrones NL que indican petición explícita de especialización
+# Patrones NL que indican petición EXPLÍCITA de especialización.
+# Solo se disparan con frases completas, no con palabras sueltas.
 _SPECIALIZATION_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"\b(?:convi[eé]rtete|convi[eé]rte|transf[oó]rmate|vu[eé]lvete)\s+(?:en|un|una)\s+(?:experto|experta)\s+(?:en\s+)?(.+)", re.IGNORECASE),
-    re.compile(r"\b(?:necesito|quiero)\s+que\s+(?:seas|te\s+conviertas)\s+(?:un\s+|una\s+)?(?:experto|experta)\s+en\s+(.+)", re.IGNORECASE),
-    re.compile(r"\b(?:crea|genera|forja)\s+(?:una\s+)?(?:c[oá]psula|especializaci[oó]n)\s+(?:para|de|en)\s+(.+)", re.IGNORECASE),
-    re.compile(r"\b(?:act[uú]a\s+como|asume\s+el\s+rol\s+de)\s+(?:un\s+|una\s+)?experto\s+en\s+(.+)", re.IGNORECASE),
+    re.compile(r"(?:convi[eé]rtete\s+en|transf[oó]rmate\s+en|vu[eé]lvete\s+en)\s+(?:un\s+|una\s+)?experto\s+en\s+(.+)", re.IGNORECASE),
+    re.compile(r"(?:necesito|quiero)\s+que\s+(?:seas|te\s+conviertas)\s+(?:un\s+|una\s+)?experto\s+en\s+(.+)", re.IGNORECASE),
+    re.compile(r"(?:crea|genera|forja)\s+(?:una\s+)?(?:c[oá]psula|especializaci[oó]n)\s+(?:para|de|en)\s+(.+)", re.IGNORECASE),
+    re.compile(r"(?:act[uú]a\s+como|asume\s+el\s+rol\s+de)\s+(?:un\s+|una\s+)?experto\s+en\s+(.+)", re.IGNORECASE),
+    re.compile(r"especial[ií]zate\s+en\s+(.+)", re.IGNORECASE),
+    re.compile(r"quiero\s+que\s+seas\s+experto\s+en\s+(.+)", re.IGNORECASE),
 ]
+
+# Lista negra de palabras que NUNCA deben generar cápsulas.
+# Si el tema detectado es una de estas palabras, NO se crea la cápsula.
+_BLACKLIST_TOPICS = frozenset({
+    "hola", "julio", "eres", "esta", "este", "búsqueda", "internet",
+    "general", "eidos", "recuerdas", "como", "qué", "quién", "dónde",
+    "cuándo", "por", "para", "con", "sin", "sobre", "después", "antes",
+    "hoy", "ayer", "ahora", "luego", "aquí", "allí", "todo", "nada",
+    "algo", "alguien", "nadie", "brent", "cotización", "precio",
+    "dame", "dime", "haz", "voy", "tengo", "quiero", "necesito",
+    "puedes", "puede", "ser", "estar", "tener", "hacer", "decir",
+    "ver", "dar", "saber", "querer", "pensar", "creer", "sentir",
+    "vivir", "morir", "abrir", "cerrar", "fue", "fui", "era", "es",
+    "son", "han", "has", "hay", "más", "menos", "muy", "poco", "mucho",
+    "siempre", "nunca", " jamás", "también", "tampoco", "sí", "no",
+    "ok", "vale", "bien", "mal", "perfecto", "genial", "gracias",
+})
 
 
 class EvolutionLoop:

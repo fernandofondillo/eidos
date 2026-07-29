@@ -111,9 +111,10 @@ class TestContextEngine:
             procedural=memory_store.procedural,
             backend=StubForgeBackend(),
         )
-        # Crear cápsula
+        # Crear cápsula (con threshold 0.85, el stub da pending_approval)
         draft, decision = forge.forge("experto en marketing")
-        assert decision.value == "auto_approved"
+        # Aprobar manualmente para que esté activa
+        forge.approve(draft.id)
 
         core = EidosCore(
             monologue_backend="stub",

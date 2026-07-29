@@ -330,7 +330,7 @@ class CapsuleForge:
     4. Persistir en ProceduralMemory (si auto) o capsule_drafts (si pendiente).
     """
 
-    AUTO_APPROVE_THRESHOLD = 0.70
+    AUTO_APPROVE_THRESHOLD = 0.85
     # Tools que SIEMPRE requieren aprobación humana (incluso con confianza alta)
     HIGH_RISK_TOOL_NAMES: frozenset[str] = frozenset(
         {"exec_command", "shell", "delete", "format", "rm", "fork_bomb"}
