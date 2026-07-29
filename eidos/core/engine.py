@@ -436,14 +436,12 @@ class EidosCore:
             logger.warning("capsule_mark_used_failed", error=str(e))
 
     def _extract_facts_and_update_semantic(self, user_input: str, response: str) -> None:
-        """Extrae hechos simples del input del usuario y los guarda en el grafo semántico.
+        """Extrae hechos del INPUT DEL USUARIO (no de la respuesta del LLM)
+        y los guarda en el grafo semántico.
 
-        Heurística basada en patrones NL comunes en español. No es perfecta,
-        pero permite que EIDOS recuerda nombres, profesiones y preferencias
-        sin necesidad de un LLM para la extracción.
-
-        Ahora también extrae de la respuesta del LLM (que suele confirmar
-        el nombre del usuario en frases como "Encantado, Fernando").
+        IMPORTANTE: Solo extraemos del user_input. La respuesta del LLM
+        puede decir "soy EIDOS" o "soy bastante curioso" y NO queremos
+        capturar eso como un nombre del usuario.
         """
         import re
 
@@ -452,59 +450,62 @@ class EidosCore:
         try:
             sem = self._memory.semantic
 
-            # Combinar input + respuesta para extracción
-            combined_text = f"{user_input} {response}"
+            # === SOLO extraer del INPUT del usuario ===
+            # NO combinar con la respuesta del LLM (causaba contaminación).
 
-            # Patrón 1: "Me llamo X" / "Soy X" / "Mi nombre es X"
+            # Patrón 1: "Me llamo X" / "Mi nombre es X"
+            # Patrón ESTRICTO: solo estos dos patrones, no "soy X" (que captura basura).
             name_patterns = [
-                r"\b(?:me llamo|mi nombre es|soy)\s+([A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+)?)",
-                r"\b(?:encantado|hola)\s*,?\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)",  # "Encantado, Fernando"
+                r"\b(?:me llamo|mi nombre es)\s+([A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+)?)",
             ]
             for pat in name_patterns:
-                m = re.search(pat, combined_text, re.IGNORECASE)
+                m = re.search(pat, user_input, re.IGNORECASE)
                 if m:
                     name = m.group(1).strip().rstrip(".,;")
                     # Capitalizar primera letra
                     name = name[0].upper() + name[1:] if name else name
-                    # Filtrar palabras que no son nombres
-                    if name and len(name) >= 2 and name.lower() not in {
+                    # Filtrar palabras que claramente no son nombres
+                    not_names = {
                         "yo", "tu", "el", "ella", "eso", "este", "aqui",
                         "ahora", "hoy", "ayer", "luego", "despues",
-                    }:
+                        "bastante", "curioso", "quien", "entonces",
+                        "mismo", "muy", "poco", "mucho", "todo", "nada",
+                        "eidos", "ia", "ai", "bot", "chatbot",
+                    }
+                    if name and len(name) >= 2 and name.lower() not in not_names:
+                        # Si ya existe un nombre distinto, REEMPLAZARLO (no acumular).
+                        existing_rels = sem.query_relations("usuario", direction="out")
+                        for r in existing_rels:
+                            if r.get("predicate") == "tiene_nombre" and r.get("dst") != name.lower().replace(" ", "_"):
+                                # Borrar el nombre anterior del grafo
+                                try:
+                                    sem._graph.remove_edge("usuario", r["dst"])
+                                    logger.info("semantic_name_replaced", old=r["dst"], new=name.lower().replace(" ", "_"))
+                                except Exception:
+                                    pass
                         sem.add_entity("usuario", "person", {"name": name})
                         sem.add_relation("usuario", "tiene_nombre", name.lower().replace(" ", "_"))
                         logger.info("semantic_fact_extracted", type="name", value=name)
                         break
 
-            # Patrón 2: "Soy [profesión]" / "Trabajo como X" / "Me dedico a X"
+            # Patrón 2: "Soy [profesión]" — solo del user_input
+            # Usar SOLO patrones explícitos de profesión, no "soy X" genérico.
             prof_patterns = [
-                r"\bsoy\s+(\w+(?:\s+\w+)?)",
                 r"\btrabajo como\s+(\w+(?:\s+\w+)?)",
                 r"\bme dedico a\s+(?:la\s+|el\s+)?(\w+(?:\s+\w+)?)",
-                r"\bsoy\s+(\w+(?:\s+\w+)?)(?:\s+de\s|,)",
+                r"\bsoy\s+(desarrollador|programador|ingeniero|abogado|médico|doctor|profesor|maestro|diseñador|arquitecto|consultor|analista|gerente|director|empresario|periodista|escritor|artista|músico|fotógrafo|coach|entrenador|investigador|científico|contador|economista)(?:\s+de\s|,|$)",
             ]
-            professions = {
-                "desarrollador", "programador", "ingeniero", "abogado", "médico",
-                "doctor", "profesor", "maestro", "diseñador", "arquitecto",
-                "consultor", "analista", "gerente", "director", "empresario",
-                "periodista", "escritor", "artista", "músico", "fotógrafo",
-                "marketing", "ventas", "finanzas", "contador", "economista",
-                "coach", "entrenador", "investigador", "científico",
-            }
             for pat in prof_patterns:
-                m = re.search(pat, combined_text, re.IGNORECASE)
+                m = re.search(pat, user_input, re.IGNORECASE)
                 if m:
                     prof = m.group(1).strip().rstrip(".,;").lower()
-                    if prof in professions or (prof and prof not in {
-                        "", "yo", "feliz", "alto", "bajo", "aqui", "ahora",
-                        "hoy", "ayer", "eso", "este", "la", "el",
-                    } and len(prof) >= 4):
+                    if prof and len(prof) >= 3:
                         sem.add_entity("usuario", "person", {"profession": prof})
                         sem.add_relation("usuario", "tiene_profesion", prof)
                         logger.info("semantic_fact_extracted", type="profession", value=prof)
                         break
 
-            # Patrón 3: "Me gusta X" / "Prefiero X" / "Odio X"
+            # Patrón 3: "Me gusta X" / "Prefiero X" / "Odio X" / "Me apasiona X"
             pref_patterns = [
                 (r"\bme gusta\s+(?:el\s+|la\s+|los\s+|las\s+)?(\w+(?:\s+\w+)?)", "le_gusta"),
                 (r"\bprefiero\s+(?:el\s+|la\s+|los\s+|las\s+)?(\w+(?:\s+\w+)?)", "prefiere"),
@@ -512,7 +513,7 @@ class EidosCore:
                 (r"\bme apasiona\s+(?:el\s+|la\s+|los\s+|las\s+)?(\w+(?:\s+\w+)?)", "le_apasiona"),
             ]
             for pat, pred in pref_patterns:
-                m = re.search(pat, combined_text, re.IGNORECASE)
+                m = re.search(pat, user_input, re.IGNORECASE)
                 if m:
                     obj = m.group(1).strip().rstrip(".,;").lower()
                     if obj and len(obj) >= 2 and obj not in {"yo", "tu", "el", "ella", "eso", "este"}:
@@ -523,15 +524,15 @@ class EidosCore:
 
             # Patrón 4: "Tengo X años" / "Vivo en X" / "Soy de X"
             age_pat = r"\btengo\s+(\d+)\s+años"
-            m = re.search(age_pat, combined_text, re.IGNORECASE)
+            m = re.search(age_pat, user_input, re.IGNORECASE)
             if m:
                 age = m.group(1)
                 sem.add_entity("usuario", "person", {"age": age})
                 sem.add_relation("usuario", "tiene_edad", f"{age}_años")
                 logger.info("semantic_fact_extracted", type="age", value=age)
 
-            city_pat = r"\b(?:vivo en|nací en|soy de|vengo de)\s+([A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+)?)"
-            m = re.search(city_pat, combined_text, re.IGNORECASE)
+            city_pat = r"\b(?:vivo en|nací en|vengo de)\s+([A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+)?)"
+            m = re.search(city_pat, user_input, re.IGNORECASE)
             if m:
                 city = m.group(1).strip().rstrip(".,;")
                 if city and len(city) >= 2:
@@ -543,10 +544,11 @@ class EidosCore:
             logger.warning("semantic_extraction_failed", error=str(e))
 
     def _query_semantic_for_context(self, user_input: str) -> str | None:
-        """Consulta el grafo semántico para enriquecer el contexto.
+        """Consulta el grafo semántico para construir el contexto que EIDOS
+        le pasa al LLM.
 
-        Si el usuario pregunta por su nombre, profesión, etc., esto devuelve
-        la información recordada.
+        Devuelve SOLO hechos confirmados (no conversaciones pasadas).
+        Si hay múltiples nombres (por datos antiguos), devuelve el último.
         """
         if self._memory is None:
             return None
@@ -556,34 +558,58 @@ class EidosCore:
             if user_entity is None:
                 return None
 
-            import re
             input_lower = user_input.lower()
-
-            # Detectar qué está preguntando el usuario
             facts: list[str] = []
+            all_rels = sem.query_relations("usuario", direction="out")
 
-            # ¿Pregunta por su nombre?
-            if any(p in input_lower for p in ["cómo me llamo", "mi nombre", "quién soy", "cómo te llamas"]):
-                rels = sem.query_relations("usuario", direction="out")
-                for r in rels:
-                    if r.get("predicate") == "tiene_nombre":
-                        name_val = r.get("dst", "").replace("_", " ").title()
-                        facts.append(f"Te llamas {name_val}")
+            # ¿Pregunta por su nombre? -> devolver SOLO el último registrado
+            if any(p in input_lower for p in ["cómo me llamo", "mi nombre", "quién soy", "cómo te llamas", "recuerdas mi nombre", "quién soy yo"]):
+                name_rels = [r for r in all_rels if r.get("predicate") == "tiene_nombre"]
+                if name_rels:
+                    name_val = name_rels[-1].get("dst", "").replace("_", " ").title()
+                    facts.append(f"Te llamas {name_val}")
 
             # ¿Pregunta por su profesión?
-            if any(p in input_lower for p in ["a qué me dedico", "mi trabajo", "mi profesión", "qué hago"]):
-                rels = sem.query_relations("usuario", direction="out")
-                for r in rels:
-                    if r.get("predicate") == "tiene_profesion":
-                        facts.append(f"Te dedicas a {r.get('dst', '')}")
+            if any(p in input_lower for p in ["a qué me dedico", "mi trabajo", "mi profesión", "qué hago", "quién soy"]):
+                prof_rels = [r for r in all_rels if r.get("predicate") == "tiene_profesion"]
+                for r in prof_rels:
+                    facts.append(f"Te dedicas a {r.get('dst', '')}")
 
             # ¿Pregunta por sus preferencias?
             if any(p in input_lower for p in ["qué me gusta", "mis gustos", "mis preferencias"]):
-                rels = sem.query_relations("usuario", direction="out")
-                for r in rels:
-                    if r.get("predicate") in ("le_gusta", "prefiere", "odia"):
-                        pred_str = {"le_gusta": "te gusta", "prefiere": "prefieres", "odia": "odias"}[r["predicate"]]
+                for r in all_rels:
+                    if r.get("predicate") in ("le_gusta", "prefiere", "odia", "le_apasiona"):
+                        pred_map = {
+                            "le_gusta": "te gusta",
+                            "prefiere": "prefieres",
+                            "odia": "odias",
+                            "le_apasiona": "te apasiona",
+                        }
+                        pred_str = pred_map.get(r["predicate"], r["predicate"])
                         facts.append(f"Te {pred_str} {r.get('dst', '')}")
+
+            # ¿Pregunta por su edad?
+            if any(p in input_lower for p in ["cuántos años", "mi edad"]):
+                for r in all_rels:
+                    if r.get("predicate") == "tiene_edad":
+                        facts.append(f"Tienes {r.get('dst', '').replace('_años', '')} años")
+
+            # ¿Pregunta por dónde vive?
+            if any(p in input_lower for p in ["dónde vivo", "dónde nací", "de dónde soy"]):
+                for r in all_rels:
+                    if r.get("predicate") == "vive_en":
+                        facts.append(f"Vives en {r.get('dst', '').title()}")
+
+            # Si no preguntó nada específico pero hay datos, incluirlos como contexto general
+            if not facts and any(p in input_lower for p in ["qué sabes", "qué recuerdas", "qué sabes de mí"]):
+                for r in all_rels:
+                    if r.get("predicate") == "tiene_nombre":
+                        name_val = r.get("dst", "").replace("_", " ").title()
+                        facts.append(f"Te llamas {name_val}")
+                    elif r.get("predicate") == "tiene_profesion":
+                        facts.append(f"Te dedicas a {r.get('dst', '')}")
+                    elif r.get("predicate") == "vive_en":
+                        facts.append(f"Vives en {r.get('dst', '').title()}")
 
             if facts:
                 return "; ".join(facts)
