@@ -270,6 +270,7 @@ class APIFallbackBackend(MonologueBackend):
             plan=[str(p) for p in plan],
             risk=str(data.get("risk", "none"))[:500],
             confidence=confidence,
+            response=str(data.get("response", ""))[:2000] or None,
             backend="api",
         )
 

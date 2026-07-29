@@ -90,7 +90,7 @@ def _build_prompt(user_input: str, context: str | None, max_plan_steps: int) -> 
     portabilidad. llama-cpp-python aplica el chat template del modelo.
     """
     ctx_block = f"\nContexto previo: {context}" if context else ""
-    return f"""Eres EIDOS, una entidad cognitiva. Analiza el siguiente input del usuario y produce un monólogo interno estructurado en JSON.
+    return f"""Eres EIDOS, una entidad cognitiva autónoma. Analiza el siguiente input del usuario y produce un monólogo interno estructurado en JSON.
 
 Input del usuario: "{user_input}"{ctx_block}
 
@@ -100,13 +100,15 @@ Devuelve EXACTAMENTE un objeto JSON con esta forma (sin texto adicional, sin mar
   "hypothesis": "hipótesis sobre la intención",
   "plan": ["paso 1", "paso 2", ...],
   "risk": "riesgo identificado o 'none'",
-  "confidence": 0.7
+  "confidence": 0.7,
+  "response": "tu respuesta conversacional natural al usuario, en español, como si estuvieras hablando con él"
 }}
 
 Restricciones:
 - plan: entre 1 y {max_plan_steps} pasos, cada uno una frase corta.
 - confidence: número entre 0.0 y 1.0.
 - risk: 'none' si no hay riesgo; descripción corta si lo hay.
+- response: ES MUY IMPORTANTE. Es lo que el usuario verá como respuesta. Debe ser natural, útil y en español. No digas que eres un JSON o que estás siguiendo un formato. Responde directamente al usuario.
 - Responde en español."""
 
 
@@ -263,6 +265,7 @@ class LlamaCppBackend(MonologueBackend):
             plan=[str(p) for p in plan],
             risk=str(data.get("risk", "none"))[:500],
             confidence=confidence,
+            response=str(data.get("response", ""))[:2000] or None,
             backend="llama_cpp",
         )
 

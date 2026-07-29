@@ -88,6 +88,15 @@ class Monologue(BaseModel):
         le=1.0,
     )
 
+    # --- Respuesta conversacional natural (Fase 6.1) ---
+    # Generada por el LLM junto con el monólogo. Es lo que el usuario
+    # ve en el chat como respuesta. Si es None, se usa el render formateado.
+    response: str | None = Field(
+        default=None,
+        description="Respuesta conversacional natural para el usuario.",
+        max_length=2000,
+    )
+
     # --- Metadatos del backend ---
     backend: Literal["stub", "llama_cpp", "api"] = Field(
         ...,
@@ -178,6 +187,11 @@ class StubMonologueBackend:
             plan=plan,
             risk=risk,
             confidence=confidence,
+            response=(
+                f"(Modo stub — sin IA real) He recibido tu mensaje sobre "
+                f"'{keywords[0] if keywords else 'tu consulta'}'. "
+                f"Para que pueda responderte properly, configura un cerebro en ⚙️ Settings."
+            ),
             backend="stub",
         )
 

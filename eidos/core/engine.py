@@ -360,16 +360,27 @@ class EidosCore:
         route: Route,
         memory_context: list[dict[str, Any]] | None,
     ) -> str:
-        """Renderiza una respuesta textual mínima, honesta y útil."""
-        plan_str = "\n  - ".join(monologue.plan)
+        """Renderiza la respuesta final que el usuario ve en el chat.
+
+        Si el monologue tiene un campo 'response' (generado por el LLM),
+        usa esa respuesta conversacional natural. Si no (stub backend),
+        formatea los campos del monólogo como fallback.
+        """
         route_str = route.route_type.value
         header = f"[EIDOS · backend={monologue.backend} · route={route_str} · conf={monologue.confidence:.2f}]"
-        body = (
-            f"\nObservación: {monologue.observation}\n"
-            f"Hipótesis: {monologue.hypothesis}\n"
-            f"Plan:\n  - {plan_str}\n"
-            f"Riesgo: {monologue.risk}\n"
-        )
+
+        # Si el LLM generó una respuesta conversacional, usarla.
+        if monologue.response and monologue.response.strip():
+            body = f"\n{monologue.response.strip()}\n"
+        else:
+            # Fallback: formatear el monólogo (modo stub o LLM sin campo response).
+            plan_str = "\n  - ".join(monologue.plan)
+            body = (
+                f"\nObservación: {monologue.observation}\n"
+                f"Hipótesis: {monologue.hypothesis}\n"
+                f"Plan:\n  - {plan_str}\n"
+                f"Riesgo: {monologue.risk}\n"
+            )
 
         if memory_context:
             body += "\nContexto recuperado de memoria episódica:\n"
