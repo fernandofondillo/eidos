@@ -222,18 +222,21 @@ class EidosCore:
         return getattr(self, "_api_backend", None)
 
     def think_and_respond(self, user_input: str, context: str | None = None) -> Response:
-        """Pipeline completo: input → memoria → monólogo → ruta → respuesta."""
+        """Pipeline completo: EIDOS piensa → consulta memoria → usa LLM → responde.
+
+        El flujo:
+        1. EIDOS registra el input en memoria sensorial.
+        2. EIDOS construye el CONTEXTO COGNITIVO (historial + hechos + cápsula).
+        3. EIDOS le pide al LLM (su sentido) que genere el monólogo + respuesta.
+        4. EIDOS decide la ruta de acción.
+        5. EIDOS registra todo en memoria y actualiza el grafo semántico.
+        """
         logger.debug("eidos_input", length=len(user_input))
 
-        # 0a. Reward de satisfacción (solo positiva — tras 3 turnos neutros)
-        # Ya NO penalizamos por el input del usuario (generaba falsos negativos
-        # cuando el usuario citaba a EIDOS diciendo "no tengo memoria" etc.).
-        # Solo damos recompensas positivas por racha de turnos sin corrección.
+        # 0a. Reward de satisfacción (solo positiva)
         reward_delta = 0.0
         if self._motivation is not None:
             try:
-                # Solo observar para racha positiva — sin penalización negativa.
-                # Pasamos un input "neutro" para que no dispare negativos.
                 reward_delta += self._motivation.observe_user_input("(neutral input)")
             except Exception as e:
                 logger.warning("motivation_observe_user_input_failed", error=str(e))
@@ -246,20 +249,67 @@ class EidosCore:
                 metadata={"context": context} if context else None,
             )
 
-        # 1. Pensar — EIDOS construye el contexto para el LLM (su "sentido")
-        # El LLM SOLO recibe hechos confirmados del grafo semántico.
-        # NO recibe conversaciones episódicas crudas (pueden estar contaminadas
-        # o ser de otra sesión). EIDOS es quien piensa; el LLM es el sentido.
+        # ================================================================
+        # 1. CONTEXT ENGINE — EIDOS construye el contexto para el LLM
+        # ================================================================
+        # EIDOS es el que PIENSA. El LLM es el SENTIDO que articula.
+        # EIDOS le pasa al LLM:
+        #   a) Historial conversacional (últimos 5 turnos de ESTA sesión)
+        #   b) Hechos confirmados del grafo semántico (nombre, profesión...)
+        #   c) Cápsula activa relevante (si hay)
+        #
+        # El LLM NO ve conversaciones de otras sesiones (evita contaminación).
+        # Solo ve el historial de ESTA sesión + hechos confirmados.
+
         full_context = context or ""
+
         if self._memory is not None:
-            # Consultar SOLO memoria semántica (hechos confirmados del usuario)
+            # a) HISTORIAL CONVERSACIONAL de esta sesión
+            # Los últimos 5 eventos sensoriales son los turnos recientes.
+            recent_events = self._memory.sensory.recent(limit=10)
+            conversation_history: list[str] = []
+            for ev in reversed(recent_events):  # cronológico
+                kind = ev.get("kind", "")
+                content = ev.get("content", "")
+                if kind == "user_input" and content:
+                    conversation_history.append(f"Usuario: {content}")
+                elif kind == "response" and content:
+                    conversation_history.append(f"EIDOS: {content}")
+
+            # Solo los últimos 5 turnos (10 eventos = 5 user + 5 response)
+            if len(conversation_history) > 10:
+                conversation_history = conversation_history[-10:]
+
+            if conversation_history:
+                history_str = "\n".join(conversation_history)
+                full_context = (full_context + "\n" if full_context else "") + f"Historial de nuestra conversación actual:\n{history_str}"
+
+            # b) HECHOS SEMÁNTICOS confirmados
             sem_ctx = self._query_semantic_for_context(user_input)
             if sem_ctx:
                 full_context = (full_context + "\n" if full_context else "") + sem_ctx
-            # NO inyectar memoria episódica cruda al LLM.
-            # La memoria episódica se usa internamente para routing (search_memory)
-            # pero no se pasa al LLM como contexto, para evitar contaminación.
 
+            # c) CÁPSULA ACTIVA relevante
+            active_capsules = self._memory.procedural.list_all(include_expired=False)
+            relevant_capsules: list[str] = []
+            for cap in active_capsules:
+                name_lower = cap.name.lower()
+                topic = name_lower
+                for prefix in ("experto en ", "experta en ", "experto ", "experta "):
+                    if topic.startswith(prefix):
+                        topic = topic[len(prefix):]
+                        break
+                topic = topic.strip()
+                if topic and len(topic) >= 3:
+                    topic_words = [w for w in topic.split() if len(w) >= 3]
+                    input_lower = user_input.lower()
+                    if any(w in input_lower for w in topic_words) or topic in input_lower:
+                        relevant_capsules.append(cap.name)
+            if relevant_capsules:
+                caps_str = ", ".join(relevant_capsules)
+                full_context = (full_context + "\n" if full_context else "") + f"Especialidad activa: {caps_str}"
+
+        # 2. EIDOS usa el LLM (su sentido) para generar el monólogo + respuesta
         monologue = self._generator.generate(user_input, full_context if full_context else None)
         logger.info(
             "eidos_monologue",
@@ -297,17 +347,11 @@ class EidosCore:
             except Exception as e:
                 logger.warning("eidos_metacognitive_store_failed", error=str(e))
 
-        # 5. Responder (template; NLG real en Fase 2)
-        # Consultar memoria semántica para enriquecer la respuesta
-        semantic_context = None
-        if self._memory is not None:
-            semantic_context = self._query_semantic_for_context(user_input)
-
+        # 5. Responder
+        # El LLM ya recibió el contexto completo (historial + hechos + cápsula)
+        # en el paso 1, así que su respuesta YA usa la memoria.
+        # Ya NO añadimos '💡' después — el LLM debe saberlo antes de responder.
         text = self._render_response(monologue, route, memory_context)
-
-        # Si hay contexto semántico (ej: "Te llamas Fernando"), añadirlo a la respuesta
-        if semantic_context:
-            text += f"\n\n💡 {semantic_context}"
 
         # 6. Sensory + Episodic + Semantic memory — registro de la interacción
         if self._memory is not None:
