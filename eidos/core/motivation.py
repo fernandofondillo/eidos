@@ -51,14 +51,20 @@ _DRIVER_WEIGHTS: dict[RewardDriver, float] = {
     RewardDriver.USER_SATISFACTION: 0.3,
 }
 
-# Palabras/frases que indican insatisfacción (heurística simple, multiidioma).
+# Frases que indican insatisfacción del usuario con EIDOS.
+# IMPORTANTE: Solo frases multi-palabra para evitar falsos negativos.
+# Un "no" suelto puede ser parte de "no tengo memoria" (citando a EIDOS).
+# Solo penalizamos cuando el usuario se dirige a EIDOS con clara insatisfacción.
 _NEGATIVE_SIGNALS = frozenset(
     {
-        # ES
-        "no", "mal", "incorrecto", "error", "equivocado", "mal hecho",
-        "no me gusta", "fallo", "malo", "terrible", "peor",
+        # ES — frases que indican que EIDOS se equivocó
+        "no, eso está mal", "eso está mal", "mal hecho", "no me gusta tu",
+        "estás equivocado", "no es correcto", "eso es incorrecto",
+        "qué mal", "qué pena", "no sirve", "no funciona", "no sirve de nada",
+        "terrible", "pésimo", "horrible",
         # EN
-        "wrong", "bad", "incorrect", "nope", "terrible", "worse", "fail",
+        "that's wrong", "you're wrong", "that's incorrect", "that's bad",
+        "not good", "doesn't work", "doesn't help", "terrible", "useless",
     }
 )
 

@@ -133,7 +133,7 @@ class TestMotivationPersistence:
     def test_total_reward_accumulates(self, motivation: MotivationModule) -> None:
         # Forzar rewards
         motivation.reward_capsule_use("cap-1")  # +0.4
-        motivation.observe_user_input("no, mal")  # -0.5
+        motivation.observe_user_input("eso está mal")  # -0.5
         total = motivation.total_reward()
         assert pytest.approx(total, abs=0.001) == -0.1
 
@@ -146,7 +146,7 @@ class TestMotivationPersistence:
     def test_rewards_by_driver(self, motivation: MotivationModule) -> None:
         motivation.reward_capsule_use("cap-1")  # +0.4
         motivation.reward_capsule_use("cap-2")  # +0.4
-        motivation.observe_user_input("no")  # -0.5
+        motivation.observe_user_input("eso es incorrecto")  # -0.5
         agg = motivation.rewards_by_driver()
         assert agg[RewardDriver.CAPSULE_REUSE.value]["count"] == 2
         assert pytest.approx(agg[RewardDriver.CAPSULE_REUSE.value]["total_delta"], abs=0.001) == 0.8

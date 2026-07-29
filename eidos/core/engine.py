@@ -241,8 +241,28 @@ class EidosCore:
                 metadata={"context": context} if context else None,
             )
 
-        # 1. Pensar
-        monologue = self._generator.generate(user_input, context)
+        # 1. Pensar — construir contexto completo para el LLM
+        # El contexto incluye: memoria semántica (hechos del usuario) +
+        # memoria episódica (conversaciones recientes) + contexto explícito.
+        full_context = context or ""
+        if self._memory is not None:
+            # Consultar memoria semántica
+            sem_ctx = self._query_semantic_for_context(user_input)
+            if sem_ctx:
+                full_context = (full_context + "\n" if full_context else "") + sem_ctx
+
+            # Consultar memoria episódica (últimas 3 interacciones relevantes)
+            try:
+                episodic_hits = self._memory.episodic.search(user_input, top_k=3)
+                if episodic_hits:
+                    episodic_str = "\n".join(
+                        f"- {h.get('content', '')[:200]}" for h in episodic_hits
+                    )
+                    full_context = (full_context + "\n" if full_context else "") + f"Conversaciones anteriores relevantes:\n{episodic_str}"
+            except Exception:
+                pass
+
+        monologue = self._generator.generate(user_input, full_context if full_context else None)
         logger.info(
             "eidos_monologue",
             id=monologue.id,
@@ -315,6 +335,11 @@ class EidosCore:
                 # NUEVO (Fase 6.1): Extraer hechos del input + respuesta y
                 # poblar el grafo semántico. Sin esto, EIDOS no recuerda nada.
                 self._extract_facts_and_update_semantic(user_input, text)
+
+                # NUEVO (Fase 6.1): Marcar cápsulas relevantes como usadas.
+                # Si el input del usuario contiene el nombre de una cápsula
+                # activa, incrementar su contador de uso.
+                self._mark_relevant_capsules_used(user_input)
             except Exception as e:
                 logger.warning("eidos_episodic_store_failed", error=str(e))
 
@@ -365,6 +390,33 @@ class EidosCore:
                 logger.info("eidos_core_shutdown_mesh_stopped")
             except Exception as e:
                 logger.warning("eidos_core_shutdown_mesh_failed", error=str(e))
+
+    def _mark_relevant_capsules_used(self, user_input: str) -> None:
+        """Si el input del usuario menciona el tema de una cápsula activa,
+        marca esa cápsula como usada (incrementa uses + actualiza last_used).
+        """
+        if self._memory is None:
+            return
+        try:
+            input_lower = user_input.lower()
+            active_capsules = self._memory.procedural.list_all(include_expired=False)
+            for cap in active_capsules:
+                # Extraer palabras clave del nombre de la cápsula
+                # ej: "Experto en Marketing" → "marketing"
+                name_lower = cap.name.lower()
+                # Quitar "experto en " / "experta en "
+                topic = name_lower.replace("experto en ", "").replace("experta en ", "").strip()
+                if topic and len(topic) >= 3 and topic in input_lower:
+                    self._memory.procedural.mark_used(cap.id)
+                    # Reward de reutilización de cápsula
+                    if self._motivation is not None:
+                        try:
+                            self._motivation.reward_capsule_use(cap.id)
+                        except Exception:
+                            pass
+                    logger.info("capsule_marked_used", id=cap.id, name=cap.name, uses=cap.uses + 1)
+        except Exception as e:
+            logger.warning("capsule_mark_used_failed", error=str(e))
 
     def _extract_facts_and_update_semantic(self, user_input: str, response: str) -> None:
         """Extrae hechos simples del input del usuario y los guarda en el grafo semántico.
