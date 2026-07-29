@@ -414,11 +414,27 @@ class EidosCore:
             except Exception as e:
                 logger.warning("eidos_metacognitive_store_failed", error=str(e))
 
-        # 5. Responder
-        # El LLM ya recibió el contexto completo (historial + hechos + cápsula)
-        # en el paso 1, así que su respuesta YA usa la memoria.
-        # Ya NO añadimos '💡' después — el LLM debe saberlo antes de responder.
-        text = self._render_response(monologue, route, memory_context)
+        # 5. EIDOS RESPONSE LAYER — La voz de EIDOS
+        # El LLM generó el monologue + response. Ahora EIDOS toma control:
+        # detecta acciones (código, tools), las ejecuta, y reformula la
+        # respuesta en primera persona de EIDOS. El LLM NUNCA habla directo.
+        from eidos.core.response_layer import EidosResponseLayer
+
+        response_layer = EidosResponseLayer(
+            sandbox=self._get_sandbox(),
+            memory=self._memory,
+        )
+
+        # Procesar la respuesta del LLM a través del Response Layer
+        llm_raw_response = monologue.response or ""
+        eidos_text = response_layer.process(
+            llm_response=llm_raw_response,
+            monologue=monologue,
+            context={"user_input": user_input},
+        )
+
+        # El texto final es la voz de EIDOS, no la del LLM
+        text = self._render_response_with_eidos_voice(monologue, route, memory_context, eidos_text)
 
         # 6. Sensory + Episodic + Semantic memory — registro de la interacción
         if self._memory is not None:
@@ -528,6 +544,41 @@ class EidosCore:
                 logger.info("eidos_core_shutdown_mesh_stopped")
             except Exception as e:
                 logger.warning("eidos_core_shutdown_mesh_failed", error=str(e))
+
+    def _get_sandbox(self) -> Any:
+        """Devuelve una instancia de ToolSandbox para el Response Layer."""
+        try:
+            from eidos.core.sandbox import ToolSandbox
+            return ToolSandbox(timeout_sec=5, mem_limit_mb=128)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _render_response_with_eidos_voice(
+        monologue: Monologue,
+        route: Route,
+        memory_context: list[dict[str, Any]] | None,
+        eidos_text: str,
+    ) -> str:
+        """Renderiza la respuesta final en voz de EIDOS.
+
+        EIDOS habla en primera persona. El header indica el backend usado.
+        El cuerpo es el texto procesado por el Response Layer.
+        """
+        route_str = route.route_type.value
+        header = f"[EIDOS · backend={monologue.backend} · route={route_str} · conf={monologue.confidence:.2f}]"
+        body = f"\n{eidos_text}\n"
+
+        if memory_context:
+            body += "\nContexto recuperado de memoria episódica:\n"
+            for i, ev in enumerate(memory_context, 1):
+                content_preview = ev.get("content", "")[:120]
+                score = ev.get("score", 0.0)
+                body += f"  [{i}] (score={score:.2f}) {content_preview}\n"
+
+        if route.next_action_hint:
+            body += f"\nPróximo paso: {route.next_action_hint}\n"
+        return header + body
 
     def _try_restore_api_backend(self) -> None:
         """Restaura el provider API activo desde .env al arrancar.

@@ -93,7 +93,7 @@ def _build_prompt(user_input: str, context: str | None, max_plan_steps: int) -> 
     ctx_block = ""
     if context:
         ctx_block = f"\n\nCONTEXTO (lo que EIDOS sabe y recuerda de esta conversación):\n{context}\n"
-    return f"""Eres EIDOS, una entidad cognitiva autónoma con memoria persistente. Analiza el siguiente input del usuario y produce un monólogo interno estructurado en JSON.
+    return f"""Eres el sentido lingüístico de EIDOS, una entidad cognitiva autónoma. EIDOS es la mente que piensa; tú eres el sentido que genera lenguaje. Genera contenido técnico y conversacional, pero NO hables en primera persona como si fueras la entidad completa. EIDOS reformulará tu respuesta con su propia voz.
 
 IMPORTANTÍSIMO: Tienes memoria y contexto. El CONTEXTO de abajo contiene:
 1. El historial de la conversación actual (lo que el usuario y tú se han dicho).

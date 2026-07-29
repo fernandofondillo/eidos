@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 # Patrones NL que indican petición explícita de especialización
 _SPECIALIZATION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b(?:convi[eé]rtete|convi[eé]rte|transf[oó]rmate|vu[eé]lvete)\s+(?:en|un|una)\s+(?:experto|experta)\s+(?:en\s+)?(.+)", re.IGNORECASE),
-    re.compile(r"\b(?:necesito|quiero)\s+que\s+(?:seas|te\s+conviertas)\s+(?:experto|experta)\s+en\s+(.+)", re.IGNORECASE),
+    re.compile(r"\b(?:necesito|quiero)\s+que\s+(?:seas|te\s+conviertas)\s+(?:un\s+|una\s+)?(?:experto|experta)\s+en\s+(.+)", re.IGNORECASE),
     re.compile(r"\b(?:crea|genera|forja)\s+(?:una\s+)?(?:c[oá]psula|especializaci[oó]n)\s+(?:para|de|en)\s+(.+)", re.IGNORECASE),
     re.compile(r"\b(?:act[uú]a\s+como|asume\s+el\s+rol\s+de)\s+(?:un\s+|una\s+)?experto\s+en\s+(.+)", re.IGNORECASE),
 ]
