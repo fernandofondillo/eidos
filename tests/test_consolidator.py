@@ -360,6 +360,8 @@ class TestEidosCoreWithMotivationAndConsolidator:
     def test_negative_input_triggers_negative_reward(
         self, memory_store: MemoryStore
     ) -> None:
+        """Ahora el input del usuario NO genera negativos (fix anti-falsos-negativos).
+        El reward_delta debe ser >= 0 (no negativo)."""
         from eidos.core.engine import EidosCore
         from eidos.core.motivation import MotivationModule
 
@@ -374,7 +376,8 @@ class TestEidosCoreWithMotivationAndConsolidator:
             auto_start_consolidator=False,
         )
         resp = core.think_and_respond("no, eso está mal")
-        assert resp.reward_delta < 0.0
+        # Ya no penalizamos por input del usuario — reward debe ser >= 0
+        assert resp.reward_delta >= 0.0
 
     def test_shutdown_stops_consolidator(
         self, memory_store: MemoryStore, monologues_dir: Path

@@ -225,11 +225,16 @@ class EidosCore:
         """Pipeline completo: input → memoria → monólogo → ruta → respuesta."""
         logger.debug("eidos_input", length=len(user_input))
 
-        # 0a. Reward de satisfacción (heurística del input del usuario)
+        # 0a. Reward de satisfacción (solo positiva — tras 3 turnos neutros)
+        # Ya NO penalizamos por el input del usuario (generaba falsos negativos
+        # cuando el usuario citaba a EIDOS diciendo "no tengo memoria" etc.).
+        # Solo damos recompensas positivas por racha de turnos sin corrección.
         reward_delta = 0.0
         if self._motivation is not None:
             try:
-                reward_delta += self._motivation.observe_user_input(user_input)
+                # Solo observar para racha positiva — sin penalización negativa.
+                # Pasamos un input "neutro" para que no dispare negativos.
+                reward_delta += self._motivation.observe_user_input("(neutral input)")
             except Exception as e:
                 logger.warning("motivation_observe_user_input_failed", error=str(e))
 
@@ -241,26 +246,19 @@ class EidosCore:
                 metadata={"context": context} if context else None,
             )
 
-        # 1. Pensar — construir contexto completo para el LLM
-        # El contexto incluye: memoria semántica (hechos del usuario) +
-        # memoria episódica (conversaciones recientes) + contexto explícito.
+        # 1. Pensar — EIDOS construye el contexto para el LLM (su "sentido")
+        # El LLM SOLO recibe hechos confirmados del grafo semántico.
+        # NO recibe conversaciones episódicas crudas (pueden estar contaminadas
+        # o ser de otra sesión). EIDOS es quien piensa; el LLM es el sentido.
         full_context = context or ""
         if self._memory is not None:
-            # Consultar memoria semántica
+            # Consultar SOLO memoria semántica (hechos confirmados del usuario)
             sem_ctx = self._query_semantic_for_context(user_input)
             if sem_ctx:
                 full_context = (full_context + "\n" if full_context else "") + sem_ctx
-
-            # Consultar memoria episódica (últimas 3 interacciones relevantes)
-            try:
-                episodic_hits = self._memory.episodic.search(user_input, top_k=3)
-                if episodic_hits:
-                    episodic_str = "\n".join(
-                        f"- {h.get('content', '')[:200]}" for h in episodic_hits
-                    )
-                    full_context = (full_context + "\n" if full_context else "") + f"Conversaciones anteriores relevantes:\n{episodic_str}"
-            except Exception:
-                pass
+            # NO inyectar memoria episódica cruda al LLM.
+            # La memoria episódica se usa internamente para routing (search_memory)
+            # pero no se pasa al LLM como contexto, para evitar contaminación.
 
         monologue = self._generator.generate(user_input, full_context if full_context else None)
         logger.info(
@@ -404,9 +402,28 @@ class EidosCore:
                 # Extraer palabras clave del nombre de la cápsula
                 # ej: "Experto en Marketing" → "marketing"
                 name_lower = cap.name.lower()
-                # Quitar "experto en " / "experta en "
-                topic = name_lower.replace("experto en ", "").replace("experta en ", "").strip()
-                if topic and len(topic) >= 3 and topic in input_lower:
+                # Quitar prefijos comunes
+                topic = name_lower
+                for prefix in ("experto en ", "experta en ", "experto ", "experta "):
+                    if topic.startswith(prefix):
+                        topic = topic[len(prefix):]
+                        break
+                topic = topic.strip()
+
+                # Matching flexible: si alguna palabra del topic (>=3 chars)
+                # aparece en el input del usuario, contar como uso.
+                topic_words = [w for w in topic.split() if len(w) >= 3]
+                matched = False
+                for word in topic_words:
+                    if word in input_lower:
+                        matched = True
+                        break
+
+                # También matching por tema completo si es una sola palabra
+                if not matched and topic and len(topic) >= 3 and topic in input_lower:
+                    matched = True
+
+                if matched:
                     self._memory.procedural.mark_used(cap.id)
                     # Reward de reutilización de cápsula
                     if self._motivation is not None:
@@ -414,7 +431,7 @@ class EidosCore:
                             self._motivation.reward_capsule_use(cap.id)
                         except Exception:
                             pass
-                    logger.info("capsule_marked_used", id=cap.id, name=cap.name, uses=cap.uses + 1)
+                    logger.info("capsule_marked_used", id=cap.id, name=cap.name)
         except Exception as e:
             logger.warning("capsule_mark_used_failed", error=str(e))
 
@@ -422,8 +439,11 @@ class EidosCore:
         """Extrae hechos simples del input del usuario y los guarda en el grafo semántico.
 
         Heurística basada en patrones NL comunes en español. No es perfecta,
-        pero permite que EIDOS recuerde nombres, profesiones y preferencias
+        pero permite que EIDOS recuerda nombres, profesiones y preferencias
         sin necesidad de un LLM para la extracción.
+
+        Ahora también extrae de la respuesta del LLM (que suele confirmar
+        el nombre del usuario en frases como "Encantado, Fernando").
         """
         import re
 
@@ -432,26 +452,36 @@ class EidosCore:
         try:
             sem = self._memory.semantic
 
+            # Combinar input + respuesta para extracción
+            combined_text = f"{user_input} {response}"
+
             # Patrón 1: "Me llamo X" / "Soy X" / "Mi nombre es X"
             name_patterns = [
                 r"\b(?:me llamo|mi nombre es|soy)\s+([A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+)?)",
+                r"\b(?:encantado|hola)\s*,?\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñ]+)",  # "Encantado, Fernando"
             ]
             for pat in name_patterns:
-                m = re.search(pat, user_input, re.IGNORECASE)
+                m = re.search(pat, combined_text, re.IGNORECASE)
                 if m:
                     name = m.group(1).strip().rstrip(".,;")
                     # Capitalizar primera letra
                     name = name[0].upper() + name[1:] if name else name
-                    if name and len(name) >= 2:
+                    # Filtrar palabras que no son nombres
+                    if name and len(name) >= 2 and name.lower() not in {
+                        "yo", "tu", "el", "ella", "eso", "este", "aqui",
+                        "ahora", "hoy", "ayer", "luego", "despues",
+                    }:
                         sem.add_entity("usuario", "person", {"name": name})
                         sem.add_relation("usuario", "tiene_nombre", name.lower().replace(" ", "_"))
                         logger.info("semantic_fact_extracted", type="name", value=name)
+                        break
 
-            # Patrón 2: "Soy [profesión]" / "Trabajo como X" / "Soy desarrollador/abogado/médico..."
+            # Patrón 2: "Soy [profesión]" / "Trabajo como X" / "Me dedico a X"
             prof_patterns = [
                 r"\bsoy\s+(\w+(?:\s+\w+)?)",
                 r"\btrabajo como\s+(\w+(?:\s+\w+)?)",
-                r"\bme dedico a\s+(\w+(?:\s+\w+)?)",
+                r"\bme dedico a\s+(?:la\s+|el\s+)?(\w+(?:\s+\w+)?)",
+                r"\bsoy\s+(\w+(?:\s+\w+)?)(?:\s+de\s|,)",
             ]
             professions = {
                 "desarrollador", "programador", "ingeniero", "abogado", "médico",
@@ -459,13 +489,16 @@ class EidosCore:
                 "consultor", "analista", "gerente", "director", "empresario",
                 "periodista", "escritor", "artista", "músico", "fotógrafo",
                 "marketing", "ventas", "finanzas", "contador", "economista",
+                "coach", "entrenador", "investigador", "científico",
             }
             for pat in prof_patterns:
-                m = re.search(pat, user_input, re.IGNORECASE)
+                m = re.search(pat, combined_text, re.IGNORECASE)
                 if m:
                     prof = m.group(1).strip().rstrip(".,;").lower()
-                    # Solo guardar si parece una profesión o si no se capturó el nombre
-                    if prof in professions or prof not in {"", "yo", "feliz", "alto", "bajo"}:
+                    if prof in professions or (prof and prof not in {
+                        "", "yo", "feliz", "alto", "bajo", "aqui", "ahora",
+                        "hoy", "ayer", "eso", "este", "la", "el",
+                    } and len(prof) >= 4):
                         sem.add_entity("usuario", "person", {"profession": prof})
                         sem.add_relation("usuario", "tiene_profesion", prof)
                         logger.info("semantic_fact_extracted", type="profession", value=prof)
@@ -476,28 +509,29 @@ class EidosCore:
                 (r"\bme gusta\s+(?:el\s+|la\s+|los\s+|las\s+)?(\w+(?:\s+\w+)?)", "le_gusta"),
                 (r"\bprefiero\s+(?:el\s+|la\s+|los\s+|las\s+)?(\w+(?:\s+\w+)?)", "prefiere"),
                 (r"\bodio\s+(?:el\s+|la\s+|los\s+|las\s+)?(\w+(?:\s+\w+)?)", "odia"),
+                (r"\bme apasiona\s+(?:el\s+|la\s+|los\s+|las\s+)?(\w+(?:\s+\w+)?)", "le_apasiona"),
             ]
             for pat, pred in pref_patterns:
-                m = re.search(pat, user_input, re.IGNORECASE)
+                m = re.search(pat, combined_text, re.IGNORECASE)
                 if m:
                     obj = m.group(1).strip().rstrip(".,;").lower()
-                    if obj and len(obj) >= 2 and obj not in {"yo", "tu", "el", "ella"}:
+                    if obj and len(obj) >= 2 and obj not in {"yo", "tu", "el", "ella", "eso", "este"}:
                         sem.add_entity(obj, "concept")
                         sem.add_relation("usuario", pred, obj)
                         logger.info("semantic_fact_extracted", type="preference", predicate=pred, value=obj)
                         break
 
-            # Patrón 4: "Tengo X años" / "Nací en X" / "Vivo en X"
+            # Patrón 4: "Tengo X años" / "Vivo en X" / "Soy de X"
             age_pat = r"\btengo\s+(\d+)\s+años"
-            m = re.search(age_pat, user_input, re.IGNORECASE)
+            m = re.search(age_pat, combined_text, re.IGNORECASE)
             if m:
                 age = m.group(1)
                 sem.add_entity("usuario", "person", {"age": age})
                 sem.add_relation("usuario", "tiene_edad", f"{age}_años")
                 logger.info("semantic_fact_extracted", type="age", value=age)
 
-            city_pat = r"\b(?:vivo en|nací en|soy de)\s+([A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+)?)"
-            m = re.search(city_pat, user_input, re.IGNORECASE)
+            city_pat = r"\b(?:vivo en|nací en|soy de|vengo de)\s+([A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑa-záéíóúñ]+)?)"
+            m = re.search(city_pat, combined_text, re.IGNORECASE)
             if m:
                 city = m.group(1).strip().rstrip(".,;")
                 if city and len(city) >= 2:
