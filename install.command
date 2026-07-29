@@ -487,6 +487,76 @@ print(f'Modelo descargado: {path}')
 fi
 
 # ============================================================================
+# 13.5 Compilación del Frontend React (Dashboard web)
+# ============================================================================
+# Sin esto, el dashboard muestra "Frontend no compilado".
+# Descargamos Node.js portable (no toca el Node del sistema) y compilamos.
+
+echo -e "${BOLD}13.5 Compilación del Frontend (Dashboard)${NC}"
+
+NODE_DIR="$ENV_DIR/node"
+NODE_BIN="$NODE_DIR/bin/node"
+NPM_BIN="$NODE_DIR/bin/npm"
+
+# Detectar arquitectura para Node.js
+if [[ "$ARCH" == "arm64" ]]; then
+    NODE_ARCH="arm64"
+elif [[ "$ARCH" == "x86_64" ]]; then
+    NODE_ARCH="x64"
+fi
+
+# Versión de Node.js (LTS)
+NODE_VERSION="v22.11.0"
+NODE_TARBALL="node-${NODE_VERSION}-darwin-${NODE_ARCH}.tar.gz"
+NODE_URL="https://nodejs.org/dist/${NODE_VERSION}/${NODE_TARBALL}"
+
+if [[ -x "$NODE_BIN" ]]; then
+    echo -e "  ${GREEN}✓${NC} Node.js ya instalado en .eidos_env/node/"
+else
+    echo -e "  ${DIM}Descargando Node.js ${NODE_VERSION} (${NODE_ARCH})...${NC}"
+    mkdir -p "$NODE_DIR"
+    if ! curl -L --fail --progress-bar "$NODE_URL" -o "$ENV_DIR/$NODE_TARBALL"; then
+        echo -e "  ${YELLOW}⚠${NC}  No se pudo descargar Node.js. El frontend no se compilará."
+        echo -e "  ${DIM}Puedes compilarlo manualmente después: cd ui && npm install && npm run build${NC}"
+    else
+        echo -e "  ${GREEN}✓${NC} Descarga completa. Extrayendo..."
+        tar -xzf "$ENV_DIR/$NODE_TARBALL" -C "$ENV_DIR"
+        # El tarball extrae a node-vX.Y.Z-darwin-arch/ — mover a node/
+        rm -rf "$NODE_DIR"
+        mv "$ENV_DIR/node-${NODE_VERSION}-darwin-${NODE_ARCH}" "$NODE_DIR"
+        rm -f "$ENV_DIR/$NODE_TARBALL"
+        if [[ -x "$NODE_BIN" ]]; then
+            echo -e "  ${GREEN}✓${NC} Node.js $("$NODE_BIN" --version) instalado"
+        else
+            echo -e "  ${YELLOW}⚠${NC}  Error extrayendo Node.js. Frontend no compilado."
+        fi
+    fi
+fi
+
+# Compilar el frontend si Node.js está disponible
+if [[ -x "$NODE_BIN" ]]; then
+    echo -e "  ${DIM}Instalando dependencias del frontend...${NC}"
+    cd "$EIDOS_ROOT/ui"
+    "$NPM_BIN" install --silent 2>/dev/null || {
+        echo -e "  ${YELLOW}⚠${NC}  npm install falló. Intentando de nuevo..."
+        "$NPM_BIN" install 2>&1 | tail -5
+    }
+
+    echo -e "  ${DIM}Compilando dashboard (puede tardar ~1 min)...${NC}"
+    if "$NPM_BIN" run build 2>&1 | tail -3; then
+        echo -e "  ${GREEN}✓${NC} Frontend compilado en ui/dist/"
+    else
+        echo -e "  ${YELLOW}⚠${NC}  La compilación del frontend falló."
+        echo -e "  ${DIM}El dashboard puede no cargar correctamente. Intenta: cd ui && npm run build${NC}"
+    fi
+    cd "$EIDOS_ROOT"
+else
+    echo -e "  ${YELLOW}⚠${NC}  Node.js no disponible. Frontend NO compilado."
+    echo -e "  ${DIM}Para compilarlo manualmente: cd ui && npm install && npm run build${NC}"
+fi
+echo ""
+
+# ============================================================================
 # 14. Creación del Launcher (EIDOS.command)
 # ============================================================================
 
