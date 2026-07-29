@@ -134,8 +134,8 @@ async def health() -> HealthResponse:
 # ---------------------------------------------------------------------------
 
 
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest) -> ChatResponse:
+@app.post("/api/chat")
+async def chat(req: ChatRequest) -> dict[str, Any]:
     """Procesa un mensaje del usuario y devuelve la respuesta completa."""
     core = get_core()
     try:
@@ -161,17 +161,20 @@ async def chat(req: ChatRequest) -> ChatResponse:
         except Exception:
             pass
 
-    return ChatResponse(
-        text=resp.text,
-        monologue_id=resp.monologue_id,
-        route_type=resp.route_type,
-        confidence=resp.confidence,
-        reward_delta=resp.reward_delta,
-        monologue_backend=resp.monologue_backend,
-        memory_context=resp.memory_context,
-        evolution_event=resp.evolution_event,
-        monologue=monologue_data,
-    )
+    # Devolver dict plano (no Pydantic) para evitar errores de serialización
+    # con objetos no-JSON-serializables en memory_context o evolution_event.
+    # default=str en json.dumps es nuestro safety net.
+    return {
+        "text": resp.text,
+        "monologue_id": resp.monologue_id,
+        "route_type": resp.route_type,
+        "confidence": resp.confidence,
+        "reward_delta": resp.reward_delta,
+        "monologue_backend": resp.monologue_backend,
+        "memory_context": resp.memory_context,
+        "evolution_event": resp.evolution_event,
+        "monologue": monologue_data,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -766,26 +769,50 @@ async def ws_chat(ws: WebSocket) -> None:
                     except Exception:
                         pass
 
-                # Enviar monologue primero
-                await ws.send_text(json.dumps({
-                    "type": "monologue",
-                    "data": monologue_data or {},
-                }))
+                # Enviar monologue primero (default=str por si hay datetime u objetos)
+                try:
+                    await ws.send_text(json.dumps({
+                        "type": "monologue",
+                        "data": monologue_data or {},
+                    }, default=str))
+                except Exception as e:
+                    logger.warning("ws_monologue_send_failed", error=str(e))
 
-                # Luego la response completa
-                await ws.send_text(json.dumps({
-                    "type": "response",
-                    "data": {
-                        "text": resp.text,
-                        "monologue_id": resp.monologue_id,
-                        "route_type": resp.route_type,
-                        "confidence": resp.confidence,
-                        "reward_delta": resp.reward_delta,
-                        "monologue_backend": resp.monologue_backend,
-                        "memory_context": resp.memory_context,
-                        "evolution_event": resp.evolution_event,
-                    },
-                }))
+                # Luego la response completa (default=str para garantizar serialización)
+                response_data = {
+                    "text": resp.text,
+                    "monologue_id": resp.monologue_id,
+                    "route_type": resp.route_type,
+                    "confidence": resp.confidence,
+                    "reward_delta": resp.reward_delta,
+                    "monologue_backend": resp.monologue_backend,
+                    "memory_context": resp.memory_context,
+                    "evolution_event": resp.evolution_event,
+                }
+                try:
+                    await ws.send_text(json.dumps({
+                        "type": "response",
+                        "data": response_data,
+                    }, default=str))
+                except Exception as e:
+                    logger.error("ws_response_send_failed", error=str(e), response_data_keys=list(response_data.keys()))
+                    # Último recurso: enviar respuesta mínima sin memory_context ni evolution_event
+                    try:
+                        await ws.send_text(json.dumps({
+                            "type": "response",
+                            "data": {
+                                "text": resp.text,
+                                "monologue_id": resp.monologue_id,
+                                "route_type": resp.route_type,
+                                "confidence": resp.confidence,
+                                "reward_delta": resp.reward_delta,
+                                "monologue_backend": resp.monologue_backend,
+                                "memory_context": None,
+                                "evolution_event": None,
+                            },
+                        }))
+                    except Exception as e2:
+                        logger.error("ws_response_send_final_failed", error=str(e2))
             except Exception as e:
                 logger.error("ws_chat_error", error=str(e))
                 await ws.send_text(json.dumps({"type": "error", "error": str(e)}))
