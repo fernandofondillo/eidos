@@ -222,14 +222,18 @@ class EidosCore:
         return getattr(self, "_api_backend", None)
 
     def think_and_respond(self, user_input: str, context: str | None = None) -> Response:
-        """Pipeline completo: EIDOS piensa → consulta memoria → usa LLM → responde.
+        """Pipeline cognitivo de EIDOS.
 
-        El flujo:
-        1. EIDOS registra el input en memoria sensorial.
+        EIDOS es el que PIENSA. El LLM es un SENTIDO que articula.
+
+        Flujo:
+        0. EIDOS registra el input en memoria sensorial.
+        1. EIDOS RAZONA por sí mismo: ¿puedo responder sin el LLM?
+           → Si puede: responde directo (backend=eidos_direct, sin LLM).
+           → Si no puede: construye contexto y usa el LLM.
         2. EIDOS construye el CONTEXTO COGNITIVO (historial + hechos + cápsula).
-        3. EIDOS le pide al LLM (su sentido) que genere el monólogo + respuesta.
-        4. EIDOS decide la ruta de acción.
-        5. EIDOS registra todo en memoria y actualiza el grafo semántico.
+        3. EIDOS le pide al LLM que genere el monólogo + respuesta.
+        4. EIDOS decide la ruta, registra en memoria, actualiza semántica.
         """
         logger.debug("eidos_input", length=len(user_input))
 
@@ -250,36 +254,89 @@ class EidosCore:
             )
 
         # ================================================================
-        # 1. CONTEXT ENGINE — EIDOS construye el contexto para el LLM
+        # 1. EIDOS DIRECT RESPONSE — EIDOS razona SIN el LLM
         # ================================================================
-        # EIDOS es el que PIENSA. El LLM es el SENTIDO que articula.
-        # EIDOS le pasa al LLM:
-        #   a) Historial conversacional (últimos 5 turnos de ESTA sesión)
-        #   b) Hechos confirmados del grafo semántico (nombre, profesión...)
-        #   c) Cápsula activa relevante (si hay)
-        #
-        # El LLM NO ve conversaciones de otras sesiones (evita contaminación).
-        # Solo ve el historial de ESTA sesión + hechos confirmados.
+        # EIDOS puede responder preguntas simples directamente desde su
+        # memoria, SIN llamar al LLM. Esto demuestra que EIDOS piensa
+        # por sí mismo — el LLM es solo un sentido para tareas complejas.
+        direct_response = self._try_direct_response(user_input)
+        if direct_response is not None:
+            # EIDOS respondió por sí mismo. No necesita el LLM.
+            logger.info("eidos_direct_response", question_type=direct_response.get("type", "unknown"))
+
+            # Construir Monologue sintético (EIDOS lo genera, no el LLM)
+            import uuid
+            from datetime import datetime, timezone
+            monologue = Monologue(
+                id=str(uuid.uuid4()),
+                timestamp=datetime.now(timezone.utc),
+                input_summary=user_input[:500],
+                observation=f"EIDOS respondió directamente desde memoria: {direct_response['type']}",
+                hypothesis=f"Pregunta simple sobre {direct_response['type']}, respondible sin LLM.",
+                plan=["Responder desde memoria semántica", "No requiere LLM"],
+                risk="none",
+                confidence=0.99,
+                response=direct_response["text"],
+                backend="eidos_direct",
+            )
+
+            # Reward de curiosidad alta (EIDOS está seguro)
+            if self._motivation is not None:
+                try:
+                    reward_delta += self._motivation.observe_confidence(0.99, monologue_id=monologue.id)
+                except Exception:
+                    pass
+
+            route = self._router.decide(monologue)
+            text = direct_response["text"]
+
+            # Registrar en memoria
+            if self._memory is not None:
+                try:
+                    self._memory.sensory.store(
+                        kind="response", content=text[:200],
+                        metadata={"route": "respond_direct", "monologue_id": monologue.id, "confidence": 0.99},
+                    )
+                    self._memory.episodic.store(
+                        kind="interaction", content=f"User: {user_input}\nEIDOS: {text[:200]}",
+                        importance=0.99, metadata={"monologue_id": monologue.id, "route": "respond_direct", "backend": "eidos_direct"},
+                    )
+                    self._memory.metacognitive.store(monologue, route_type="respond_direct")
+                    self._extract_facts_and_update_semantic(user_input, text)
+                    self._mark_relevant_capsules_used(user_input)
+                except Exception as e:
+                    logger.warning("eidos_direct_memory_store_failed", error=str(e))
+
+            return Response(
+                text=f"[EIDOS · backend=eidos_direct · route=respond_direct · conf=0.99]\n{text}",
+                monologue_id=monologue.id,
+                route_type="respond_direct",
+                confidence=0.99,
+                reward_delta=round(reward_delta, 4),
+                monologue_backend="eidos_direct",
+            )
+
+        # ================================================================
+        # 2. CONTEXT ENGINE — EIDOS construye el contexto para el LLM
+        # ================================================================
+        # EIDOS no pudo responder solo. Necesita el LLM (su sentido).
+        # Le construye un contexto cognitivo completo.
 
         full_context = context or ""
 
         if self._memory is not None:
             # a) HISTORIAL CONVERSACIONAL de esta sesión
-            # Los últimos 5 eventos sensoriales son los turnos recientes.
             recent_events = self._memory.sensory.recent(limit=10)
             conversation_history: list[str] = []
-            for ev in reversed(recent_events):  # cronológico
+            for ev in reversed(recent_events):
                 kind = ev.get("kind", "")
                 content = ev.get("content", "")
                 if kind == "user_input" and content:
                     conversation_history.append(f"Usuario: {content}")
                 elif kind == "response" and content:
                     conversation_history.append(f"EIDOS: {content}")
-
-            # Solo los últimos 5 turnos (10 eventos = 5 user + 5 response)
             if len(conversation_history) > 10:
                 conversation_history = conversation_history[-10:]
-
             if conversation_history:
                 history_str = "\n".join(conversation_history)
                 full_context = (full_context + "\n" if full_context else "") + f"Historial de nuestra conversación actual:\n{history_str}"
@@ -309,7 +366,12 @@ class EidosCore:
                 caps_str = ", ".join(relevant_capsules)
                 full_context = (full_context + "\n" if full_context else "") + f"Especialidad activa: {caps_str}"
 
-        # 2. EIDOS usa el LLM (su sentido) para generar el monólogo + respuesta
+            # d) RESUMEN DE SESIONES ANTERIORES (cross-session memory)
+            session_summary = self._load_session_summary()
+            if session_summary:
+                full_context = (full_context + "\n" if full_context else "") + f"Resumen de sesiones anteriores:\n{session_summary}"
+
+        # 3. EIDOS usa el LLM (su sentido) para generar el monólogo + respuesta
         monologue = self._generator.generate(user_input, full_context if full_context else None)
         logger.info(
             "eidos_monologue",
@@ -416,7 +478,9 @@ class EidosCore:
         return self._mesh_coordinator
 
     def shutdown(self) -> None:
-        """Detiene consolidador, libera CortexHub y detiene MeshCoordinator."""
+        """Detiene consolidador, libera CortexHub, detiene Mesh, guarda sesión."""
+        # Guardar resumen de sesión para cross-session memory
+        self._save_session_summary()
         if self._consolidator is not None:
             self._consolidator.stop()
             logger.info("eidos_core_shutdown_consolidator_stopped")
@@ -432,6 +496,170 @@ class EidosCore:
                 logger.info("eidos_core_shutdown_mesh_stopped")
             except Exception as e:
                 logger.warning("eidos_core_shutdown_mesh_failed", error=str(e))
+
+    def _try_direct_response(self, user_input: str) -> dict[str, Any] | None:
+        """EIDOS razona por sí mismo: ¿puede responder sin el LLM?
+
+        Si el usuario pregunta por algo que EIDOS sabe (nombre, profesión,
+        preferencias, edad, ciudad), EIDOS responde directamente desde su
+        grafo semántico — SIN llamar al LLM.
+
+        Returns:
+            dict con 'text' y 'type', o None si EIDOS no puede responder solo.
+        """
+        if self._memory is None:
+            return None
+
+        try:
+            sem = self._memory.semantic
+            user_entity = sem.get_entity("usuario")
+            if user_entity is None:
+                return None  # No hay datos del usuario todavía
+
+            input_lower = user_input.lower()
+            all_rels = sem.query_relations("usuario", direction="out")
+
+            # ¿Pregunta por su nombre?
+            name_triggers = ["cómo me llamo", "mi nombre", "quién soy", "cómo te llamas",
+                             "recuerdas mi nombre", "quién soy yo", "me llamo"]
+            if any(p in input_lower for p in name_triggers):
+                name_rels = [r for r in all_rels if r.get("predicate") == "tiene_nombre"]
+                if name_rels:
+                    name_val = name_rels[-1].get("dst", "").replace("_", " ").title()
+                    return {"text": f"Te llamas {name_val}.", "type": "nombre"}
+
+            # ¿Pregunta por su profesión?
+            prof_triggers = ["a qué me dedico", "mi trabajo", "mi profesión", "qué hago", "a qué te dedicas"]
+            if any(p in input_lower for p in prof_triggers):
+                prof_rels = [r for r in all_rels if r.get("predicate") == "tiene_profesion"]
+                if prof_rels:
+                    prof_val = prof_rels[-1].get("dst", "")
+                    return {"text": f"Te dedicas a {prof_val}.", "type": "profesion"}
+
+            # ¿Pregunta por sus preferencias?
+            pref_triggers = ["qué me gusta", "mis gustos", "mis preferencias"]
+            if any(p in input_lower for p in pref_triggers):
+                prefs = []
+                for r in all_rels:
+                    if r.get("predicate") in ("le_gusta", "prefiere", "odia", "le_apasiona"):
+                        pred_map = {"le_gusta": "Te gusta", "prefiere": "Prefieres", "odia": "Odias", "le_apasiona": "Te apasiona"}
+                        prefs.append(f"{pred_map.get(r['predicate'], r['predicate'])} {r.get('dst', '')}")
+                if prefs:
+                    return {"text": "; ".join(prefs) + ".", "type": "preferencias"}
+
+            # ¿Pregunta por su edad?
+            age_triggers = ["cuántos años", "mi edad"]
+            if any(p in input_lower for p in age_triggers):
+                for r in all_rels:
+                    if r.get("predicate") == "tiene_edad":
+                        age = r.get("dst", "").replace("_años", "")
+                        return {"text": f"Tienes {age} años.", "type": "edad"}
+
+            # ¿Pregunta por dónde vive?
+            city_triggers = ["dónde vivo", "dónde nací", "de dónde soy"]
+            if any(p in input_lower for p in city_triggers):
+                for r in all_rels:
+                    if r.get("predicate") == "vive_en":
+                        city = r.get("dst", "").title()
+                        return {"text": f"Vives en {city}.", "type": "ciudad"}
+
+            # ¿Pregunta "qué sabes de mí"?
+            if any(p in input_lower for p in ["qué sabes de mí", "qué recuerdas de mí", "qué sabes de mi"]):
+                facts = []
+                for r in all_rels:
+                    if r.get("predicate") == "tiene_nombre":
+                        facts.append(f"Te llamas {r.get('dst', '').replace('_', ' ').title()}")
+                    elif r.get("predicate") == "tiene_profesion":
+                        facts.append(f"Te dedicas a {r.get('dst', '')}")
+                    elif r.get("predicate") == "vive_en":
+                        facts.append(f"Vives en {r.get('dst', '').title()}")
+                    elif r.get("predicate") == "tiene_edad":
+                        facts.append(f"Tienes {r.get('dst', '').replace('_años', '')} años")
+                if facts:
+                    return {"text": "Esto es lo que sé de ti: " + "; ".join(facts) + ".", "type": "perfil_completo"}
+
+            # ¿Pregunta por sus cápsulas?
+            if any(p in input_lower for p in ["qué cápsulas", "qué especialidades", "tienes cápsulas"]):
+                caps = self._memory.procedural.list_all(include_expired=False)
+                if caps:
+                    cap_names = [c.name for c in caps]
+                    return {"text": f"Tengo {len(caps)} cápsula(s) activa(s): {', '.join(cap_names)}.", "type": "cápsulas"}
+
+            # No puede responder directamente → necesita el LLM
+            return None
+
+        except Exception as e:
+            logger.warning("eidos_direct_response_failed", error=str(e))
+            return None
+
+    def _load_session_summary(self) -> str | None:
+        """Carga un resumen de sesiones anteriores para cross-session memory.
+
+        Lee data/session_summary.json (si existe) y devuelve un string
+        con los puntos clave de conversaciones pasadas.
+        """
+        if self._monologues_dir is None:
+            return None
+        summary_path = self._monologues_dir.parent / "session_summary.json"
+        if not summary_path.exists():
+            return None
+        try:
+            import json
+            data = json.loads(summary_path.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and "summary" in data:
+                return data["summary"]
+            if isinstance(data, str):
+                return data
+        except Exception:
+            pass
+        return None
+
+    def _save_session_summary(self) -> None:
+        """Guarda un resumen de la sesión actual para cross-session memory.
+
+        Extrae los hechos semánticos y los últimos temas tratados, y los
+        guarda en data/session_summary.json.
+        """
+        if self._memory is None or self._monologues_dir is None:
+            return
+        try:
+            import json
+            sem = self._memory.semantic
+            all_rels = sem.query_relations("usuario", direction="out")
+
+            facts: list[str] = []
+            for r in all_rels:
+                pred = r.get("predicate", "")
+                dst = r.get("dst", "")
+                if pred == "tiene_nombre":
+                    facts.append(f"El usuario se llama {dst.replace('_', ' ').title()}")
+                elif pred == "tiene_profesion":
+                    facts.append(f"Se dedica a {dst}")
+                elif pred == "vive_en":
+                    facts.append(f"Vive en {dst.title()}")
+                elif pred == "tiene_edad":
+                    facts.append(f"Tiene {dst.replace('_años', '')} años")
+                elif pred == "le_gusta":
+                    facts.append(f"Le gusta {dst}")
+                elif pred == "le_apasiona":
+                    facts.append(f"Le apasiona {dst}")
+
+            # Cápsulas activas
+            caps = self._memory.procedural.list_all(include_expired=False)
+            if caps:
+                cap_names = [c.name for c in caps]
+                facts.append(f"Cápsulas activas: {', '.join(cap_names)}")
+
+            summary = {
+                "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                "summary": ". ".join(facts) if facts else "Sesión sin hechos específicos registrados.",
+            }
+
+            summary_path = self._monologues_dir.parent / "session_summary.json"
+            summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+            logger.info("session_summary_saved", path=str(summary_path), facts=len(facts))
+        except Exception as e:
+            logger.warning("session_summary_save_failed", error=str(e))
 
     def _mark_relevant_capsules_used(self, user_input: str) -> None:
         """Si el input del usuario menciona el tema de una cápsula activa,

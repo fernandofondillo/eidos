@@ -98,7 +98,7 @@ class Monologue(BaseModel):
     )
 
     # --- Metadatos del backend ---
-    backend: Literal["stub", "llama_cpp", "api"] = Field(
+    backend: Literal["stub", "llama_cpp", "api", "eidos_direct"] = Field(
         ...,
         description="Qué generador produjo este monólogo. Útil para debugging.",
     )
