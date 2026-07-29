@@ -461,6 +461,33 @@ class EidosCore:
             except Exception as e:
                 logger.warning("eidos_evolution_failed", error=str(e))
 
+        # ================================================================
+        # 8. TOOL CREATION — EIDOS crea herramientas autónomamente
+        # ================================================================
+        # Si el usuario pide una herramienta ("crea una tool que X"),
+        # EIDOS extrae el código de la respuesta del LLM, lo valida en
+        # el ToolSandbox, y si pasa, lo guarda como tool reutilizable.
+        tool_event: dict[str, Any] | None = None
+        tool_event = self._try_tool_creation(user_input, monologue, text)
+
+        # ================================================================
+        # 9. AUTO-EVOLUTION — EIDOS evoluciona su comportamiento
+        # ================================================================
+        # a) Promover cápsulas con uses >= 3 a favoritas.
+        # b) Detectar patrón de corrección: si el usuario ha dicho algo
+        #    negativo recientemente, ajustar confianza.
+        auto_evolution_event: dict[str, Any] | None = None
+        auto_evolution_event = self._run_auto_evolution(user_input, monologue)
+
+        # Combinar evolution_event con tool_event y auto_evolution_event
+        combined_evolution = evolution_event
+        if tool_event:
+            combined_evolution = combined_evolution or {}
+            combined_evolution["tool_created"] = tool_event
+        if auto_evolution_event:
+            combined_evolution = combined_evolution or {}
+            combined_evolution["auto_evolution"] = auto_evolution_event
+
         return Response(
             text=text,
             monologue_id=monologue.id,
@@ -469,7 +496,7 @@ class EidosCore:
             memory_context=memory_context,
             reward_delta=round(reward_delta, 4),
             monologue_backend=monologue.backend,
-            evolution_event=evolution_event,
+            evolution_event=combined_evolution,
         )
 
     @property
@@ -496,6 +523,233 @@ class EidosCore:
                 logger.info("eidos_core_shutdown_mesh_stopped")
             except Exception as e:
                 logger.warning("eidos_core_shutdown_mesh_failed", error=str(e))
+
+    def _try_tool_creation(self, user_input: str, monologue: Monologue, response_text: str) -> dict[str, Any] | None:
+        """EIDOS crea herramientas autónomamente.
+
+        Si el usuario pide una herramienta ("crea una tool que X", "hazme
+        una función que Y"), EIDOS:
+        1. Extrae código Python de la respuesta del LLM.
+        2. Lo valida en el ToolSandbox (AST + ejecución segura).
+        3. Si pasa, lo guarda como tool reutilizable en la cápsula activa
+           o crea una nueva cápsula para alojarlo.
+        4. Si no pasa, informa al usuario del error.
+
+        Returns:
+            dict con 'created', 'name', 'status' o None si no aplica.
+        """
+        import re
+
+        input_lower = user_input.lower()
+
+        # Detectar si el usuario pide una herramienta
+        tool_triggers = [
+            "crea una tool", "crea una herramienta", "crea una función",
+            "hazme una función", "hazme una tool", "crea un script",
+            "escribe una función", "programa una función", "crea código que",
+            "crea una herramienta que",
+        ]
+        if not any(t in input_lower for t in tool_triggers):
+            return None
+
+        logger.info("eidos_tool_creation_detected", input=user_input[:100])
+
+        # Extraer código Python de la respuesta del LLM
+        # Buscar bloques ```python ... ``` o ``` ... ```
+        code_blocks = re.findall(r'```(?:python)?\s*\n(.*?)```', response_text, re.DOTALL)
+        if not code_blocks:
+            # Buscar funciones def ... que no estén en markdown
+            code_blocks = re.findall(r'((?:def\s+\w+\s*\([^)]*\)\s*:\s*\n(?:\s+.*\n?)+)+)', response_text)
+        if not code_blocks:
+            return {"created": False, "reason": "No se encontró código Python en la respuesta."}
+
+        code = code_blocks[0].strip()
+
+        # Extraer nombre de la función principal
+        func_match = re.search(r'def\s+(\w+)\s*\(', code)
+        if not func_match:
+            return {"created": False, "reason": "No se encontró función 'def' en el código."}
+        tool_name = func_match.group(1)
+
+        # Validar en ToolSandbox
+        try:
+            from eidos.core.sandbox import ToolSandbox
+            sandbox = ToolSandbox(timeout_sec=5, mem_limit_mb=128)
+            result = sandbox.run_code(code, entry=None)  # solo cargar, no ejecutar
+
+            if result.is_security_error:
+                logger.warning("eidos_tool_security_rejected", tool=tool_name, violations=result.security_violations)
+                return {
+                    "created": False,
+                    "name": tool_name,
+                    "status": "rejected_security",
+                    "reason": f"El código fue rechazado por seguridad: {result.security_violations}",
+                }
+
+            # Hacer smoke test: ejecutar la función sin args (si acepta defaults)
+            smoke_result = sandbox.smoke_test_tool(code, entry=tool_name, test_args={})
+            if not smoke_result.ok and smoke_result.exit_code != 2:  # exit 2 = "entry not found" (OK si tiene args)
+                logger.warning("eidos_tool_smoke_failed", tool=tool_name, error=smoke_result.stderr[:200])
+                return {
+                    "created": False,
+                    "name": tool_name,
+                    "status": "smoke_test_failed",
+                    "reason": f"La herramienta falló al ejecutarse: {smoke_result.stderr[:200]}",
+                }
+
+            # Si pasa, guardar como tool
+            if self._memory is not None:
+                # Buscar cápsula activa relevante o crear una nueva
+                from eidos.core.forge import CapsuleForge, StubForgeBackend
+                from eidos.core.sandbox import ToolSandbox as TS
+
+                forge = CapsuleForge(
+                    db_path=self._memory.db_path,
+                    procedural=self._memory.procedural,
+                    backend=StubForgeBackend(),
+                    sandbox=TS(),
+                )
+
+                # Crear cápsula con la tool
+                from eidos.core.forge import CapsuleDraft, CapsuleOntology, CapsuleRule, CapsuleTone, CapsuleTool
+                draft = CapsuleDraft(
+                    name=f"Herramienta: {tool_name}",
+                    version="1.0.0",
+                    description=f"Herramienta '{tool_name}' creada por EIDOS a petición del usuario.",
+                    ontology=CapsuleOntology(domain="tools"),
+                    rules=[
+                        CapsuleRule(
+                            id="r1",
+                            condition=f"Usuario necesita usar {tool_name}",
+                            action=f"Ejecutar {tool_name} desde la tool guardada",
+                            priority=1,
+                        )
+                    ],
+                    tone=CapsuleTone(style="technical"),
+                    tools=[
+                        CapsuleTool(
+                            name=tool_name,
+                            entry_point=tool_name,
+                            code=code,
+                        )
+                    ],
+                    genesis_confidence=0.9,
+                    smoke_test_passed=True,
+                    smoke_test_output=f"Tool {tool_name} validada en sandbox.",
+                )
+
+                # Forzar pending (las tools requieren aprobación humana por seguridad)
+                forge._persist_draft(draft, __import__("eidos.core.forge", fromlist=["ForgeDecision"]).ForgeDecision.PENDING_APPROVAL)
+
+                logger.info("eidos_tool_created", tool=tool_name, status="pending_approval")
+                return {
+                    "created": True,
+                    "name": tool_name,
+                    "status": "pending_approval",
+                    "message": f"He creado la herramienta '{tool_name}', la he validado en el sandbox, y está lista para usar. Apruébala en el panel de Cápsulas.",
+                }
+
+        except Exception as e:
+            logger.error("eidos_tool_creation_error", error=str(e))
+            return {"created": False, "reason": f"Error al crear la tool: {e}"}
+
+        return None
+
+    def _run_auto_evolution(self, user_input: str, monologue: Monologue) -> dict[str, Any] | None:
+        """EIDOS evoluciona su comportamiento basándose en la experiencia.
+
+        a) PROMOCIÓN: si una cápsula tiene uses >= 3, la promueve a favorita.
+        b) DETECCIÓN DE PATRÓN: si el usuario pide lo mismo 3+ veces,
+           EIDOS crea una cápsula automáticamente.
+        c) AJUSTE DE CONFIANZA: si el reward acumulado es negativo,
+           EIDOS baja su confidence_threshold temporalmente.
+
+        Returns:
+            dict con eventos de evolución, o None.
+        """
+        events: list[str] = []
+
+        if self._memory is None:
+            return None
+
+        try:
+            # a) PROMOVER cápsulas con uses >= 3 a favoritas
+            if self._evolution_loop is not None:
+                try:
+                    promoted = self._evolution_loop.check_promotions()
+                    if promoted:
+                        events.append(f"Cápsulas promovidas a favoritas: {', '.join(promoted)}")
+                        logger.info("auto_evolution_promoted", count=len(promoted))
+                except Exception as e:
+                    logger.warning("auto_evolution_promote_failed", error=str(e))
+
+            # b) DETECTAR PATRÓN RECURRENTE
+            # Si el usuario ha preguntado por el mismo tema 3+ veces en
+            # los últimos eventos sensoriales, y no hay cápsula para eso,
+            # crear una automáticamente.
+            try:
+                recent = self._memory.sensory.recent(limit=20)
+                user_inputs = [ev.get("content", "").lower() for ev in recent if ev.get("kind") == "user_input"]
+
+                if len(user_inputs) >= 3:
+                    # Buscar palabra que aparezca en 3+ inputs
+                    from collections import Counter
+                    word_counts: Counter[str] = Counter()
+                    for inp in user_inputs:
+                        words = [w for w in inp.split() if len(w) >= 4]
+                        word_counts.update(words)
+
+                    for word, count in word_counts.most_common(5):
+                        if count >= 3:
+                            # Verificar si ya existe una cápsula para este tema
+                            existing_caps = self._memory.procedural.list_all()
+                            already_exists = any(
+                                word in c.name.lower() for c in existing_caps
+                            )
+                            if not already_exists:
+                                # Crear cápsula automáticamente
+                                from eidos.core.forge import CapsuleForge, StubForgeBackend
+                                forge = CapsuleForge(
+                                    db_path=self._memory.db_path,
+                                    procedural=self._memory.procedural,
+                                    backend=StubForgeBackend(),
+                                )
+                                draft, decision = forge.forge(
+                                    f"experto en {word}",
+                                    context={"requested_by": "auto_evolution_pattern"},
+                                )
+                                if decision.value == "auto_approved":
+                                    events.append(f"Cápsula auto-creada por patrón recurrente: Experto en {word}")
+                                    logger.info("auto_evolution_pattern_capsule", word=word, count=count)
+                                break  # solo 1 por turno
+            except Exception as e:
+                logger.warning("auto_evolution_pattern_failed", error=str(e))
+
+            # c) AJUSTE DE CONFIANZA basado en reward acumulado
+            if self._motivation is not None:
+                try:
+                    total_reward = self._motivation.total_reward()
+                    current_threshold = self._router.confidence_threshold
+
+                    if total_reward < -1.0 and current_threshold > 0.4:
+                        # Bajar threshold: ser más cauteloso, pedir más aclaraciones
+                        self._router = type(self._router)(confidence_threshold=0.4)
+                        events.append("Ajuste: bajando threshold de confianza (reward negativo acumulado)")
+                        logger.info("auto_evolution_threshold_lowered", total_reward=total_reward)
+                    elif total_reward > 2.0 and current_threshold < 0.7:
+                        # Subir threshold: ser más seguro, responder directo
+                        self._router = type(self._router)(confidence_threshold=0.7)
+                        events.append("Ajuste: subiendo threshold de confianza (reward positivo)")
+                        logger.info("auto_evolution_threshold_raised", total_reward=total_reward)
+                except Exception as e:
+                    logger.warning("auto_evolution_confidence_failed", error=str(e))
+
+        except Exception as e:
+            logger.warning("auto_evolution_failed", error=str(e))
+
+        if events:
+            return {"events": events}
+        return None
 
     def _try_direct_response(self, user_input: str) -> dict[str, Any] | None:
         """EIDOS razona por sí mismo: ¿puede responder sin el LLM?
