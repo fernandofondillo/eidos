@@ -558,6 +558,20 @@ async def set_active_provider(payload: dict[str, Any]) -> dict[str, Any]:
     core = get_core()
     core.set_api_backend(backend)
 
+    # Persistir el provider activo para que se restaure al reiniciar
+    try:
+        import json as _json
+        active_path = _project_root / "data" / "active_provider.json"
+        active_path.parent.mkdir(parents=True, exist_ok=True)
+        active_path.write_text(_json.dumps({
+            "provider_id": provider_id,
+            "provider_name": provider.name,
+            "model": provider.default_model,
+            "api_type": provider.api_type,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.warning("active_provider_persist_failed", error=str(e))
+
     logger.info(
         "active_provider_set",
         provider_id=provider_id,

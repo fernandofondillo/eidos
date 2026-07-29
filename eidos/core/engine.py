@@ -108,6 +108,11 @@ class EidosCore:
 
         self._router = ActionRouter(confidence_threshold=confidence_threshold)
 
+        # AUTO-RESTAURAR provider activo desde .env al arrancar.
+        # Si el usuario configuró MiniMax/OpenAI/etc. en una sesión anterior,
+        # EIDOS lo restaura automáticamente al reiniciar.
+        self._try_restore_api_backend()
+
         # Arrancar consolidador background si está configurado
         if self._consolidator is not None and auto_start_consolidator:
             self._consolidator.start()
@@ -524,6 +529,68 @@ class EidosCore:
             except Exception as e:
                 logger.warning("eidos_core_shutdown_mesh_failed", error=str(e))
 
+    def _try_restore_api_backend(self) -> None:
+        """Restaura el provider API activo desde .env al arrancar.
+
+        Lee data/active_provider.json (si existe) para saber qué provider
+        estaba activo la última vez. Lee las keys de .env y reconstruye
+        el APIFallbackBackend correspondiente.
+        """
+        import json
+        import os
+
+        try:
+            # 1. Leer qué provider estaba activo
+            if self._monologues_dir is None:
+                return
+            active_path = self._monologues_dir.parent / "active_provider.json"
+            if not active_path.exists():
+                return
+
+            active_data = json.loads(active_path.read_text(encoding="utf-8"))
+            provider_id = active_data.get("provider_id")
+            if not provider_id:
+                return
+
+            # 2. Buscar el provider en el catálogo
+            try:
+                from eidos.web.providers import get_provider
+            except ImportError:
+                return  # providers.py solo disponible cuando el web server está activo
+
+            provider = get_provider(provider_id)
+            if provider is None:
+                return
+
+            # 3. Leer la API key desde .env
+            env_path = self._monologues_dir.parent.parent / ".env"
+            api_key = ""
+            if env_path.exists():
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith(f"{provider.env_var}="):
+                        api_key = line.split("=", 1)[1].strip()
+                        break
+
+            if not api_key:
+                return  # No hay key configurada
+
+            # 4. Reconstruir el backend
+            os.environ[provider.env_var] = api_key
+            from eidos.cortex.api_fallback import APIFallbackBackend
+
+            backend = APIFallbackBackend(
+                base_url=provider.base_url,
+                api_key_env=provider.env_var,
+                model=provider.default_model,
+                api_type=provider.api_type,
+            )
+            self.set_api_backend(backend)
+            logger.info("eidos_api_backend_restored", provider=provider_id, model=provider.default_model)
+
+        except Exception as e:
+            logger.warning("eidos_api_backend_restore_failed", error=str(e))
+
     def _try_tool_creation(self, user_input: str, monologue: Monologue, response_text: str) -> dict[str, Any] | None:
         """EIDOS crea herramientas autónomamente.
 
@@ -829,8 +896,17 @@ class EidosCore:
                         facts.append(f"Vives en {r.get('dst', '').title()}")
                     elif r.get("predicate") == "tiene_edad":
                         facts.append(f"Tienes {r.get('dst', '').replace('_años', '')} años")
+                    elif r.get("predicate") == "tiene_proyecto":
+                        facts.append(f"Tienes un proyecto: {r.get('dst', '')}")
                 if facts:
                     return {"text": "Esto es lo que sé de ti: " + "; ".join(facts) + ".", "type": "perfil_completo"}
+
+            # ¿Pregunta por sus proyectos?
+            if any(p in input_lower for p in ["mi proyecto", "qué proyecto", "qué estoy trabajando", "retoma el plan", "retoma el proyecto"]):
+                proj_rels = [r for r in all_rels if r.get("predicate") == "tiene_proyecto"]
+                if proj_rels:
+                    projects = [r.get("dst", "") for r in proj_rels]
+                    return {"text": f"Tu proyecto activo es: {', '.join(projects)}.", "type": "proyecto"}
 
             # ¿Pregunta por sus cápsulas?
             if any(p in input_lower for p in ["qué cápsulas", "qué especialidades", "tienes cápsulas"]):
@@ -1066,6 +1142,23 @@ class EidosCore:
                     sem.add_relation("usuario", "vive_en", city.lower())
                     logger.info("semantic_fact_extracted", type="city", value=city)
 
+            # Patrón 5: Proyectos y temas activos
+            # "Mi proyecto es X" / "Estoy trabajando en X" / "Guarda este plan de X"
+            project_patterns = [
+                r"\b(?:mi proyecto es|estoy trabajando en|estoy desarrollando)\s+(.+?)(?:\.|,|$)",
+                r"\b(?:guarda|recuerda|anota)\s+(?:este\s+)?(?:plan|proyecto|idea)\s+(?:de\s+|sobre\s+)?(.+?)(?:\.|,|$)",
+                r"\b(?:retoma|continúa|sigue con)\s+(?:el\s+)?(?:plan|proyecto)\s+(?:de\s+)?(.+?)(?:\.|,|$)",
+            ]
+            for pat in project_patterns:
+                m = re.search(pat, user_input, re.IGNORECASE)
+                if m:
+                    project = m.group(1).strip().rstrip(".,;").lower()
+                    if project and len(project) >= 3:
+                        sem.add_entity(project, "project")
+                        sem.add_relation("usuario", "tiene_proyecto", project)
+                        logger.info("semantic_fact_extracted", type="project", value=project)
+                        break
+
         except Exception as e:
             logger.warning("semantic_extraction_failed", error=str(e))
 
@@ -1136,6 +1229,14 @@ class EidosCore:
                         facts.append(f"Te dedicas a {r.get('dst', '')}")
                     elif r.get("predicate") == "vive_en":
                         facts.append(f"Vives en {r.get('dst', '').title()}")
+                    elif r.get("predicate") == "tiene_proyecto":
+                        facts.append(f"Tienes un proyecto: {r.get('dst', '')}")
+
+            # Incluir proyectos activos en cualquier consulta contextual
+            proj_rels = [r for r in all_rels if r.get("predicate") == "tiene_proyecto"]
+            if proj_rels and not facts:
+                for r in proj_rels:
+                    facts.append(f"Proyecto activo: {r.get('dst', '')}")
 
             if facts:
                 return "; ".join(facts)
