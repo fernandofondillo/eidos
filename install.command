@@ -673,6 +673,19 @@ echo ""
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
 MINIMAX_API_KEY=
+MINIMAX_ANTHROPIC_API_KEY=
+OPENROUTER_API_KEY=
+TOGETHER_API_KEY=
+GROQ_API_KEY=
+
+# Embeddings — configura tu provider de embeddings aquí.
+# Opciones: stub (sin API), minimax (embo-01), openai (text-embedding-3-small)
+EMBEDDING_PROVIDER=stub
+EMBEDDING_API_KEY=
+EMBEDDING_BASE_URL=
+EMBEDDING_MODEL=
+EMBEDDING_GROUP_ID=
+EMBEDDING_DIM=
 ENV_EOF
 
 # README visible en el SSD

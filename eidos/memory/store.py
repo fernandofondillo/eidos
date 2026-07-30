@@ -59,9 +59,16 @@ class MemoryStore:
         Args:
             config: dict de config completo.
             project_root: raíz del proyecto.
-            embedder: opcional, inyecta un EmbedderBackend (Fase 2) para la
-                capa episódica. Si es None, usa stub_embed.
+            embedder: opcional, inyecta un EmbedderBackend. Si es None,
+                intenta cargar desde .env (EMBEDDING_PROVIDER).
         """
+        # Si no se pasa embedder, intentar cargar desde .env
+        if embedder is None:
+            try:
+                from eidos.cortex.embeddings_api import create_embedder_from_env
+                embedder = create_embedder_from_env()
+            except Exception:
+                pass  # Si falla, usa stub_embed (default de EpisodicMemory)
         mem_cfg = config.get("memory", {})
         db_path = project_root / mem_cfg.get("episodic", {}).get("db_path", "data/eidos.db")
         migrations_dir = project_root / "data/migrations"

@@ -365,6 +365,68 @@ Verás una respuesta coherente e inteligente (3-8 segundos). ¡EIDOS piensa de v
 
 ---
 
+## 🔬 FASE 5.5: Configurar Embeddings (Memoria Semántica Real)
+
+EIDOS usa embeddings para buscar en su memoria episódica de forma semántica (encontrar conversaciones por significado, no por palabra exacta). Por defecto usa un **stub** (bag-of-words determinista, sin API) que funciona pero no es muy preciso.
+
+Para activar embeddings reales, necesitas configurar un provider en el archivo `.env` de tu SSD.
+
+### Opción A: MiniMax (embo-01) — Recomendado si ya tienes API key de MiniMax
+
+MiniMax tiene un modelo de embeddings llamado `embo-01`. NO es compatible con el formato OpenAI, pero EIDOS ya tiene un adaptador específico.
+
+1. Abre el archivo `.env` en tu SSD (Finder → SSD → carpeta `eidos` → Cmd+Shift+. para ver archivos ocultos).
+2. Busca la sección `# Embeddings` y configura:
+
+```env
+EMBEDDING_PROVIDER=minimax
+EMBEDDING_API_KEY=tu-api-key-de-minimax
+EMBEDDING_BASE_URL=https://api.minimax.io
+EMBEDDING_MODEL=embo-01
+EMBEDDING_DIM=1024
+```
+
+> **Nota**: MiniMax-M3 NO hace embeddings. M3 es solo para chat. El modelo de embeddings es `embo-01`, que es diferente y está incluido en tu TOKEN plan de MiniMax.
+
+> **GroupId**: Si tu cuenta de MiniMax tiene un Group ID (visible en platform.minimaxi.com), añádelo:
+> ```
+> EMBEDDING_GROUP_ID=tu-group-id
+> ```
+
+3. Reinicia EIDOS (cierra Terminal, doble clic en `EIDOS.command`).
+4. Verás en el panel de Memoria: `embedding_dim=1024` (en vez de 256).
+
+### Opción B: OpenAI (text-embedding-3-small)
+
+Si tienes una API key de OpenAI:
+
+```env
+EMBEDDING_PROVIDER=openai
+EMBEDDING_API_KEY=sk-tu-key-de-openai
+EMBEDDING_BASE_URL=https://api.openai.com/v1
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIM=1536
+```
+
+### Opción C: Stub (sin API) — Default
+
+Si no configuras nada, EIDOS usa el stub (bag-of-words). Funciona pero la búsqueda semántica es menos precisa:
+
+```env
+EMBEDDING_PROVIDER=stub
+```
+
+### ¿Cómo saber cuál está activo?
+
+Después de reiniciar EIDOS, mira el log en `data/eidos_server.log`:
+- `embedder_using_stub` → usando stub (sin API)
+- `embedder_using_minimax` → usando MiniMax embo-01
+- `embedder_using_openai` → usando OpenAI
+
+O en el dashboard, el panel de Memoria mostrará `embedding_dim=1024` (MiniMax) o `embedding_dim=1536` (OpenAI) o `embedding_dim=256` (stub).
+
+---
+
 ## 🧭 FASE 6: Entender el Dashboard
 
 ### Header
